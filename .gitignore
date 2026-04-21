@@ -1,0 +1,21 @@
+# Binaries
+menace
+bin/
+.DS_Store
+
+# User data (stays local, never committed)
+config.json
+menace.db
+menace.db-shm
+menace.db-wal
+menace.log
+themes/custom.toml
+workspaces/
+sessions/
+
+# Legacy
+proposals.json
+tasks.yaml
+agents/*/auth.json
+agents/*/sessions/
+.pi/

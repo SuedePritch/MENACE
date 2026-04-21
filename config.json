@@ -1,0 +1,62 @@
+{
+  "concurrency": 3,
+  "max_retry": 2,
+  "chat_char_limit": 2000,
+  "chat_max_height": 20,
+  "ollama_base_url": "http://localhost:11434/v1",
+  "theme": "gruvbox",
+  "keys": {
+    "normal": {
+      "/": "insert",
+      "G": "bottom",
+      "P": "project",
+      "S": "sessions",
+      "X": "clear_all",
+      "ctrl+c": "quit",
+      "ctrl+l": "clear_chat",
+      "ctrl+n": "new_session",
+      "d": "half_down",
+      "down": "down",
+      "enter": "confirm",
+      "g": "top",
+      "h": "left",
+      "i": "insert",
+      "j": "down",
+      "k": "up",
+      "l": "right",
+      "left": "left",
+      "right": "right",
+      "shift+tab": "prev_panel",
+      "tab": "next_panel",
+      "u": "half_up",
+      "up": "up"
+    },
+    "insert": {
+      "alt+enter": "newline",
+      "ctrl+l": "clear_chat",
+      "ctrl+u": "clear_input",
+      "enter": "send",
+      "esc": "escape",
+      "pgdown": "page_down",
+      "pgup": "page_up"
+    },
+    "modal": {
+      "D": "delete",
+      "G": "bottom",
+      "a": "approve",
+      "d": "half_down",
+      "down": "down",
+      "enter": "confirm",
+      "esc": "escape",
+      "g": "top",
+      "j": "down",
+      "k": "up",
+      "q": "escape",
+      "r": "retry",
+      "tab": "switch_pane",
+      "u": "half_up",
+      "up": "up",
+      "x": "cancel"
+    }
+  }
+}

@@ -1,0 +1,38 @@
+[meta]
+name = "menace"
+author = "MENACE"
+
+[colors]
+active   = "#3aff37"
+inactive = "#585858"
+accent   = "#ff3dbe"
+text     = "#e4e4e4"
+subtle   = "#4e4e4e"
+muted    = "#9a9a9a"
+warn     = "#d29922"
+fail     = "#f85149"
+success  = "#3aff37"
+dim      = "#6e6e6e"
+info     = "#5de4c7"
+
+[personality]
+banner = """
+███╗   ███╗███████╗███╗   ██╗ █████╗  ██████╗███████╗
+████╗ ████║██╔════╝████╗  ██║██╔══██╗██╔════╝██╔════╝
+██╔████╔██║█████╗  ██╔██╗ ██║███████║██║     █████╗
+██║╚██╔╝██║██╔══╝  ██║╚██╗██║██╔══██║██║     ██╔══╝
+██║ ╚═╝ ██║███████╗██║ ╚████║██║  ██║╚██████╗███████╗
+╚═╝     ╚═╝╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝ ╚═════╝╚══════╝"""
+
+welcome    = "MENACE is loose. Press i to chat."
+thinking   = "thinking..."
+done       = "nothing left to destroy."
+cancelled  = "⏹ Cancelled"
+switched   = "Switched to %s. Press i to chat."
+new_session = "New session in %s. Press i to chat."
+havoc      = "%s %d wreaking havoc"
+input_hint = "press i or / to chat"
+empty           = ["Chat with the architect.", "Research, brainstorm, propose.", "", "Press i to start."]
+panel_architect = "architect"
+panel_proposals = "proposals"
+panel_tasks     = "tasks"

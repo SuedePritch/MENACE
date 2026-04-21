@@ -1,0 +1,35 @@
+[meta]
+name = "midnight"
+author = "MENACE"
+
+[colors]
+active   = "#7aa2f7"
+inactive = "#3b4261"
+accent   = "#bb9af7"
+text     = "#c0caf5"
+subtle   = "#3b4261"
+muted    = "#565f89"
+warn     = "#e0af68"
+fail     = "#f7768e"
+success  = "#9ece6a"
+dim      = "#414868"
+info     = "#7dcfff"
+
+[personality]
+banner = """
+█ ▄▀▄ █ ▄▄█ ▄▄▀█ ▄▄▀█ ▄▄█ ▄▄██
+█ █▄█ █ ▄▄█ ██ █ ▀▀ █ ███ ▄▄██
+█▄███▄█▄▄▄█▄██▄█▄██▄█▄▄▄█▄▄▄██"""
+
+welcome         = "the night shift begins. press i to chat."
+thinking        = "contemplating..."
+done            = "silence falls."
+cancelled       = "⏹ aborted"
+switched        = "drifted to %s. press i to chat."
+new_session     = "clean slate in %s. press i to chat."
+havoc           = "%s %d in the shadows"
+input_hint      = "press i or / to whisper"
+empty           = ["the void awaits.", "speak to the oracle.", "", "press i to begin."]
+panel_architect = "oracle"
+panel_proposals = "blueprints"
+panel_tasks     = "operations"

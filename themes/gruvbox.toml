@@ -1,0 +1,35 @@
+[meta]
+name = "gruvbox"
+author = "MENACE"
+
+[colors]
+active   = "#b8bb26"
+inactive = "#504945"
+accent   = "#fe8019"
+text     = "#ebdbb2"
+subtle   = "#504945"
+muted    = "#928374"
+warn     = "#fabd2f"
+fail     = "#fb4934"
+success  = "#b8bb26"
+dim      = "#665c54"
+info     = "#83a598"
+
+[personality]
+banner = """
+ ╔╦╗╔═╗╔╗╔╔═╗╔═╗╔═╗
+ ║║║║╣ ║║║╠═╣║  ║╣
+ ╩ ╩╚═╝╝╚╝╩ ╩╚═╝╚═╝"""
+
+welcome         = "MENACE is loose. press i to chat."
+thinking        = "thinking..."
+done            = "all quiet on the front."
+cancelled       = "⏹ cancelled"
+switched        = "moved to %s. press i to chat."
+new_session     = "fresh start in %s. press i to chat."
+havoc           = "%s %d hard at work"
+input_hint      = "press i or / to chat"
+empty           = ["talk to the architect.", "plan, then execute.", "", "press i to start."]
+panel_architect = "architect"
+panel_proposals = "proposals"
+panel_tasks     = "queue"

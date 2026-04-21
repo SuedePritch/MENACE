@@ -1,0 +1,35 @@
+[meta]
+name = "catppuccin"
+author = "MENACE"
+
+[colors]
+active   = "#a6e3a1"
+inactive = "#585b70"
+accent   = "#f5c2e7"
+text     = "#cdd6f4"
+subtle   = "#45475a"
+muted    = "#6c7086"
+warn     = "#f9e2af"
+fail     = "#f38ba8"
+success  = "#a6e3a1"
+dim      = "#585b70"
+info     = "#89dceb"
+
+[personality]
+banner = """
+ ┏┳┓┏━╸┏┓╻┏━┓┏━╸┏━╸
+ ┃┃┃┣╸ ┃┗┫┣━┫┃  ┣╸
+ ╹ ╹┗━╸╹ ╹╹ ╹┗━╸┗━╸"""
+
+welcome         = "MENACE awakens. press i to chat."
+thinking        = "pondering..."
+done            = "everything in its place."
+cancelled       = "⏹ nevermind"
+switched        = "now in %s. press i to chat."
+new_session     = "blank canvas in %s. press i to chat."
+havoc           = "%s %d causing mischief"
+input_hint      = "press i or / to chat"
+empty           = ["hello there.", "the architect is listening.", "", "press i to start."]
+panel_architect = "mind"
+panel_proposals = "ideas"
+panel_tasks     = "work"

@@ -137,19 +137,24 @@ func (m model) renderBanner(w int) string {
 			m.ts.theme.Personality.Done))
 	}
 
+	// Center banner art as a block (preserving internal spacing)
+	bannerBlock := lipgloss.PlaceHorizontal(w, lipgloss.Center, strings.Join(styled, "\n"))
+
+	// Center status lines independently
+	var statusLines []string
 	projectLabel := filepath.Base(m.project.cwd)
 	if len(m.project.list) > 1 {
 		projectLabel = fmt.Sprintf("%s [%d/%d]", projectLabel, m.project.idx+1, len(m.project.list))
 	}
-	projectName := lipgloss.NewStyle().Foreground(ColorMuted).Render(projectLabel)
-	styled = append(styled, projectName)
+	statusLines = append(statusLines, lipgloss.NewStyle().Foreground(ColorMuted).Render(projectLabel))
 
 	if len(parts) > 0 {
 		sep := lipgloss.NewStyle().Foreground(ColorSubtle).Render("  ·  ")
-		styled = append(styled, strings.Join(parts, sep))
+		statusLines = append(statusLines, strings.Join(parts, sep))
 	}
 
-	return lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(strings.Join(styled, "\n"))
+	statusBlock := lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(strings.Join(statusLines, "\n"))
+	return bannerBlock + "\n" + statusBlock
 }
 
 // ── Help Bar ─────────────────────────────────────────────────────────────────

@@ -116,6 +116,7 @@ func (m model) handleNormal(act action) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case actSettings:
+		m.ts.names = config.ListThemes(m.ts.dir)
 		m.activeModal = NewSettingsModal(m.store, m.ts.cfg, m.ts.theme, m.ts.names, m.ts.dir, m.project.id)
 		return m, nil
 	}

@@ -1,0 +1,44 @@
+[meta]
+name = "cyberpunk"
+author = "MENACE"
+
+[colors]
+active   = "#ff8c00"
+inactive = "#2a2a2a"
+accent   = "#ff4500"
+text     = "#e0e0e0"
+subtle   = "#333333"
+muted    = "#666666"
+warn     = "#ffa500"
+fail     = "#ff0000"
+success  = "#00ff00"
+dim      = "#1c1c1c"
+info     = "#00ffff"
+
+[personality]
+banner = '''
+      ______
+   .-"      "-.
+  /            \
+ |              |
+ |,  .-.  .-.  ,|
+ | )(__/  \__)( |
+ |/     /\     \|
+ (_     ^^     _)
+  \__|IIIIII|__/
+   | \IIIIII/ |
+   \          /
+    `--------`'''
+
+welcome         = "SYSTEM BREACHED. INITIALIZING HACK. Press i to inject payload."
+thinking        = "cracking firewall..."
+done            = "mainframe compromised."
+cancelled       = "✖ CONNECTION TERMINATED"
+switched        = "PIVOTED TO %s. STANDING BY."
+new_session     = "NEW BREACH IN %s. STANDING BY."
+havoc           = "%s %d NODES COMPROMISED"
+input_hint      = "press i or / to hack"
+empty           = ["AWAITING COMMAND...", "EXPLOIT VULNERABILITIES.", "", "PRESS I TO BEGIN BREACH."]
+panel_architect = "sysadmin"
+panel_proposals = "exploits"
+panel_tasks     = "payloads"

@@ -198,8 +198,8 @@ func loadThemeFile(path string) (Theme, bool) {
 		return Theme{}, false
 	}
 
-	// Clean up banner from TOML
-	t.Personality.Banner = padBanner(strings.TrimSpace(dedent(t.Personality.Banner)))
+	// Clean up banner from TOML — trim leading/trailing newlines only, preserve internal spacing
+	t.Personality.Banner = padBanner(strings.Trim(t.Personality.Banner, "\n\r"))
 
 	// Fill in any missing personality strings from defaults
 	defaults := DefaultPersonality()

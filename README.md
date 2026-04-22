@@ -2,7 +2,7 @@
 
 A command center for AI-driven code changes.
 
-![MENACE Workflow](https://vhs.charm.sh/vhs-78ioaWWNdQ5bG8PpIo4Q9e.gif)
+![MENACE Workflow](demo/workflow.gif)
 
 ---
 
@@ -94,7 +94,7 @@ menace
 
 First run walks you through setup:
 
-![MENACE Setup](https://vhs.charm.sh/vhs-4cyR1QZdv4ccCSvKBzHbDi.gif)
+![MENACE Setup](demo/setup.gif)
 
 1. **Select provider** — Anthropic, Google, OpenAI, or Ollama
 2. **Enter API key** — or set `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` env var (Ollama runs locally, no key needed)

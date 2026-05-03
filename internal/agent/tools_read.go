@@ -2,7 +2,9 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,56 +13,39 @@ import (
 	"strings"
 	"time"
 
-	"menace/internal/indexer"
-
 	"github.com/flitsinc/go-llms/tools"
 )
 
-// toolTimeout is the maximum duration for shell-out tools (grep, find).
-// Prevents pathological regex patterns or huge directory trees from hanging.
 const toolTimeout = 30 * time.Second
 
-// Pre-compiled regexes shared across tool handlers.
-var (
-	// sigRe matches function/type/class signature lines for outline extraction.
-	sigRe = regexp.MustCompile(`^(func |type |interface |struct |export )?(function|class|interface|type|enum|func |type |struct )`)
-	// funcStartRe matches the start of a function/method/class definition.
-	funcStartRe = regexp.MustCompile(`^(func |.*function |.*class |def )`)
-)
-
-// Tool result limits — cap output to avoid LLM context bloat.
 const (
 	maxSearchResults   = 80
-	maxFindFiles       = 50
-	maxReferences      = 60
+	maxFindSymbols     = 60
+	maxReadFileSize    = 10 * 1024 * 1024
 	maxBraceBlockLines = 200
-	maxTypeBlockLines  = 150
-	maxGrepPreview     = 20
-	maxReadFileSize    = 10 * 1024 * 1024 // 10MB
 )
+
+// Pre-compiled regex for brace-based get_function fallback.
+var funcStartRe = regexp.MustCompile(`^(func |.*function |.*class |def )`)
 
 // ReadTools returns the read-only tool set (for architect).
 func ReadTools(cwd string) []tools.Tool {
 	return []tools.Tool{
-		listDirTool(cwd),
+		treeTool(cwd),
+		findSymbolTool(cwd),
 		readFileTool(cwd),
 		searchCodeTool(cwd),
-		findFilesTool(cwd),
-		fileOutlineTool(cwd),
 		getFunctionTool(cwd),
-		getImportsTool(cwd),
-		getTypeTool(cwd),
-		findReferencesTool(cwd),
-		fileStatsTool(cwd),
-		projectOutlineTool(cwd),
+		callersTool(cwd),
+		calleesTool(cwd),
+		symbolContextTool(cwd),
+		grepFilesTool(cwd),
 	}
 }
 
-// resolvePath resolves a relative or absolute path and ensures the result is
-// contained within cwd. This prevents path-traversal attacks where an LLM
-// could request files outside the working directory (e.g. "../../../../etc/passwd").
-// If the resolved path escapes cwd, we return cwd itself so the caller gets a
-// harmless "is a directory" error instead of leaking sensitive data.
+
+// resolvePath resolves a relative or absolute path within cwd.
+// Prevents path-traversal outside the working directory.
 func resolvePath(cwd, path string) string {
 	var resolved string
 	if filepath.IsAbs(path) {
@@ -68,12 +53,9 @@ func resolvePath(cwd, path string) string {
 	} else {
 		resolved = filepath.Join(cwd, path)
 	}
-	// Resolve symlinks to prevent escaping cwd via symlinked directories.
-	// EvalSymlinks also cleans the path, normalising away ".." components.
 	if evaled, err := filepath.EvalSymlinks(resolved); err == nil {
 		resolved = evaled
 	}
-	// Re-evaluate cwd through symlinks too so the prefix check is consistent.
 	evaledCwd := cwd
 	if ec, err := filepath.EvalSymlinks(cwd); err == nil {
 		evaledCwd = ec
@@ -84,33 +66,183 @@ func resolvePath(cwd, path string) string {
 	return resolved
 }
 
-// ── list_dir ───────────────────────────────────────────────────────────────
+// ── tree ───────────────────────────────────────────────────────────────────
 
-type listDirParams struct {
-	Path string `json:"path" description:"Directory path"`
+type treeParams struct {
+	Path  string `json:"path,omitempty" description:"Directory path (default: .)"`
+	Depth int    `json:"depth,omitempty" description:"Max depth (default: 3)"`
 }
 
-func listDirTool(cwd string) tools.Tool {
-	return tools.Func("List Directory", "List directory contents. Returns names with / suffix for directories.", "list_dir",
-		func(r tools.Runner, p listDirParams) tools.Result {
-			target := resolvePath(cwd, p.Path)
-			entries, err := os.ReadDir(target)
-			if err != nil {
-				return tools.Error(err)
+func treeTool(cwd string) tools.Tool {
+	return tools.Func("Tree", "Show directory tree. Returns compact indented layout. Use depth to avoid noise.", "tree",
+		func(r tools.Runner, p treeParams) tools.Result {
+			root := cwd
+			if p.Path != "" {
+				root = resolvePath(cwd, p.Path)
 			}
-			var lines []string
-			for _, e := range entries {
-				name := e.Name()
-				if e.IsDir() {
-					name += "/"
-				}
-				lines = append(lines, name)
+			depth := 3
+			if p.Depth > 0 {
+				depth = p.Depth
 			}
-			if len(lines) == 0 {
+			var sb strings.Builder
+			_ = walkTree(root, root, 0, depth, &sb)
+			out := strings.TrimSpace(sb.String())
+			if out == "" {
 				return tools.SuccessFromString("(empty)")
 			}
-			return tools.SuccessFromString(strings.Join(lines, "\n"))
+			return tools.SuccessFromString(out)
 		})
+}
+
+func walkTree(root, path string, level, maxDepth int, sb *strings.Builder) error {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		// Skip common noise directories
+		if e.IsDir() && (name == "node_modules" || name == "vendor" || name == ".git" ||
+			name == "dist" || name == "build" || name == ".next") {
+			continue
+		}
+		rel, _ := filepath.Rel(root, filepath.Join(path, name))
+		indent := strings.Repeat("  ", level)
+		if e.IsDir() {
+			sb.WriteString(indent + name + "/\n")
+			if level+1 < maxDepth {
+				_ = walkTree(root, filepath.Join(path, name), level+1, maxDepth, sb)
+			}
+		} else {
+			sb.WriteString(indent + rel[strings.LastIndex(rel, string(filepath.Separator))+1:] + "\n")
+		}
+	}
+	return nil
+}
+
+// ── find_symbol ────────────────────────────────────────────────────────────
+
+type findSymbolParams struct {
+	Name string `json:"name" description:"Symbol name or partial name"`
+	Path string `json:"path,omitempty" description:"File or directory to search (default: .)"`
+}
+
+// ctagsEntry is the JSON output format from universal-ctags --output-format=json
+type ctagsEntry struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Line    int    `json:"line"`
+	End     int    `json:"end"` // populated with --fields=+e
+	Kind    string `json:"kind"`
+	Pattern string `json:"pattern"`
+}
+
+func findSymbolTool(cwd string) tools.Tool {
+	return tools.Func("Find Symbol", "Find where a symbol is defined. Returns file:line-range for each match. Uses ctags (language-agnostic).", "find_symbol",
+		func(r tools.Runner, p findSymbolParams) tools.Result {
+			searchPath := cwd
+			if p.Path != "" {
+				searchPath = resolvePath(cwd, p.Path)
+			}
+
+			ctx, cancel := context.WithTimeout(r.Context(), toolTimeout)
+			defer cancel()
+
+			entries, err := runCtags(ctx, searchPath)
+			if err != nil {
+				// ctags not available — fall back to grep
+				return findSymbolGrep(ctx, cwd, searchPath, p.Name)
+			}
+
+			// Filter by name (case-insensitive partial match)
+			nameLower := strings.ToLower(p.Name)
+			var matches []string
+			for _, e := range entries {
+				if strings.Contains(strings.ToLower(e.Name), nameLower) {
+					rel, _ := filepath.Rel(cwd, e.Path)
+					if rel == "" {
+						rel = e.Path
+					}
+					loc := fmt.Sprintf("%s:%d", rel, e.Line)
+					if e.End > 0 {
+						loc = fmt.Sprintf("%s:%d-%d", rel, e.Line, e.End)
+					}
+					matches = append(matches, fmt.Sprintf("%s\t%s\t%s", loc, e.Kind, e.Name))
+				}
+			}
+
+			if len(matches) == 0 {
+				return tools.SuccessFromString(fmt.Sprintf("Symbol %q not found.", p.Name))
+			}
+			if len(matches) > maxFindSymbols {
+				matches = matches[:maxFindSymbols]
+			}
+			return tools.SuccessFromString(strings.Join(matches, "\n"))
+		})
+}
+
+func runCtags(ctx context.Context, path string) ([]ctagsEntry, error) {
+	args := []string{
+		"--output-format=json",
+		"--fields=+ne", // n=line number, e=end line
+		"-f", "-",      // output to stdout
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		args = append(args, "-R", path)
+	} else {
+		args = append(args, path)
+	}
+
+	cmd := exec.CommandContext(ctx, "ctags", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		// ctags exits non-zero on warnings sometimes; try to parse anyway
+		if len(out) == 0 {
+			return nil, err
+		}
+	}
+
+	var entries []ctagsEntry
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var e ctagsEntry
+		if json.Unmarshal(line, &e) == nil {
+			entries = append(entries, e)
+		}
+	}
+	return entries, nil
+}
+
+func findSymbolGrep(ctx context.Context, cwd, searchPath, name string) tools.Result {
+	cmd := exec.CommandContext(ctx, "grep", "-rn", "-w", "--", name, searchPath)
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return tools.SuccessFromString(fmt.Sprintf("Symbol %q not found.", name))
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) > maxFindSymbols {
+		lines = lines[:maxFindSymbols]
+	}
+	var refs []string
+	for _, l := range lines {
+		parts := strings.SplitN(l, ":", 3)
+		if len(parts) >= 2 {
+			rel, _ := filepath.Rel(cwd, parts[0])
+			if rel == "" {
+				rel = parts[0]
+			}
+			refs = append(refs, rel+":"+parts[1])
+		}
+	}
+	return tools.SuccessFromString(strings.Join(refs, "\n"))
 }
 
 // ── read_file ──────────────────────────────────────────────────────────────
@@ -122,11 +254,10 @@ type readFileParams struct {
 }
 
 func readFileTool(cwd string) tools.Tool {
-	return tools.Func("Read File", "Read file contents with line numbers. Supports optional line range.", "read_file",
+	return tools.Func("Read File", "Read file contents with line numbers. Use start_line/end_line to read a range.", "read_file",
 		func(r tools.Runner, p readFileParams) tools.Result {
 			target := resolvePath(cwd, p.Path)
 
-			// When a line range is provided, stream the file to avoid loading it all.
 			if p.StartLine != nil || p.EndLine != nil {
 				return readFileRange(target, p.StartLine, p.EndLine)
 			}
@@ -136,7 +267,7 @@ func readFileTool(cwd string) tools.Tool {
 				return tools.Error(err)
 			}
 			if info.Size() > maxReadFileSize {
-				return tools.SuccessFromString(fmt.Sprintf("File too large (%d bytes, max %d). Use start_line/end_line to read a range.", info.Size(), maxReadFileSize))
+				return tools.SuccessFromString(fmt.Sprintf("File too large (%d bytes). Use start_line/end_line.", info.Size()))
 			}
 
 			data, err := os.ReadFile(target)
@@ -152,7 +283,6 @@ func readFileTool(cwd string) tools.Tool {
 		})
 }
 
-// readFileRange reads only the requested line range using a streaming scanner.
 func readFileRange(target string, startLine, endLine *int) tools.Result {
 	f, err := os.Open(target)
 	if err != nil {
@@ -167,7 +297,7 @@ func readFileRange(target string, startLine, endLine *int) tools.Result {
 	if start < 1 {
 		start = 1
 	}
-	end := -1 // no limit
+	end := -1
 	if endLine != nil {
 		end = *endLine
 	}
@@ -203,12 +333,16 @@ type searchCodeParams struct {
 }
 
 func searchCodeTool(cwd string) tools.Tool {
-	return tools.Func("Search Code", "Search for a pattern across files using grep. Returns file:line:match. Max 80 results.", "search_code",
+	return tools.Func("Search Code", "Search for a pattern across files. Returns file:line:match. Max 80 results.", "search_code",
 		func(r tools.Runner, p searchCodeParams) tools.Result {
 			searchPath := cwd
-			if p.Path != "" { searchPath = resolvePath(cwd, p.Path) }
+			if p.Path != "" {
+				searchPath = resolvePath(cwd, p.Path)
+			}
 			args := []string{"-rn"}
-			if p.FileGlob != "" { args = append(args, "--include="+p.FileGlob) }
+			if p.FileGlob != "" {
+				args = append(args, "--include="+p.FileGlob)
+			}
 			args = append(args, "--", p.Pattern, searchPath)
 			ctx, cancel := context.WithTimeout(r.Context(), toolTimeout)
 			defer cancel()
@@ -219,85 +353,15 @@ func searchCodeTool(cwd string) tools.Tool {
 				if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 					return tools.SuccessFromString("No matches.")
 				}
-				if result == "" { return tools.SuccessFromString("No matches.") }
-			}
-			lines := strings.Split(result, "\n")
-			if len(lines) > maxSearchResults { lines = lines[:maxSearchResults] }
-			return tools.SuccessFromString(strings.Join(lines, "\n"))
-		})
-}
-
-// ── find_files ─────────────────────────────────────────────────────────────
-
-type findFilesParams struct {
-	Pattern string `json:"pattern" description:"Glob pattern, e.g. '*.go'"`
-	Path    string `json:"path,omitempty" description:"Search root (default: .)"`
-}
-
-func findFilesTool(cwd string) tools.Tool {
-	return tools.Func("Find Files", "Find files by name/glob pattern. Max 50 results.", "find_files",
-		func(r tools.Runner, p findFilesParams) tools.Result {
-			searchPath := cwd
-			if p.Path != "" { searchPath = resolvePath(cwd, p.Path) }
-			ctx, cancel := context.WithTimeout(r.Context(), toolTimeout)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "find", searchPath,
-				"-name", p.Pattern,
-				"-not", "-path", "*/node_modules/*",
-				"-not", "-path", "*/.git/*",
-				"-not", "-path", "*/dist/*",
-			)
-			out, _ := cmd.Output()
-			result := strings.TrimSpace(string(out))
-			if result == "" { return tools.SuccessFromString("No files found.") }
-			lines := strings.Split(result, "\n")
-			if len(lines) > maxFindFiles { lines = lines[:maxFindFiles] }
-			return tools.SuccessFromString(strings.Join(lines, "\n"))
-		})
-}
-
-// ── file_outline ───────────────────────────────────────────────────────────
-
-type fileOutlineParams struct {
-	Path string `json:"path" description:"File path"`
-}
-
-func fileOutlineTool(cwd string) tools.Tool {
-	return tools.Func("File Outline", "Get a compact outline of a file: symbol names, kinds, line ranges, exports. No source code.", "file_outline",
-		func(r tools.Runner, p fileOutlineParams) tools.Result {
-			target := resolvePath(cwd, p.Path)
-
-			// Try AST indexer first
-			if idx := indexer.ForFile(target); idx != nil {
-				syms, err := idx.SymbolsInFile(target)
-				if err == nil && len(syms) > 0 {
-					var lines []string
-					for _, s := range syms {
-						exp := ""
-						if s.ExportStatus == "exported" { exp = " [exp]" }
-						if s.ExportStatus == "default" { exp = " [default]" }
-						deps := ""
-						if len(s.Dependencies) > 0 { deps = " → " + strings.Join(s.Dependencies, ", ") }
-						lines = append(lines, fmt.Sprintf("%d-%d\t%s\t%s%s%s", s.StartLine, s.EndLine, s.Kind, s.Name, exp, deps))
-					}
-					return tools.SuccessFromString(strings.Join(lines, "\n"))
+				if result == "" {
+					return tools.SuccessFromString("No matches.")
 				}
 			}
-
-			// Regex fallback
-			data, err := os.ReadFile(target)
-			if err != nil { return tools.Error(err) }
-			lines := strings.Split(string(data), "\n")
-			var sigs []string
-			for i, line := range lines {
-				if sigRe.MatchString(strings.TrimSpace(line)) {
-					sigs = append(sigs, fmt.Sprintf("%d\t%s", i+1, strings.TrimSpace(line)))
-				}
+			lines := strings.Split(result, "\n")
+			if len(lines) > maxSearchResults {
+				lines = lines[:maxSearchResults]
 			}
-			if len(sigs) == 0 {
-				return tools.SuccessFromString(fmt.Sprintf("(%d lines, no extractable signatures)", len(lines)))
-			}
-			return tools.SuccessFromString(strings.Join(sigs, "\n"))
+			return tools.SuccessFromString(strings.Join(lines, "\n"))
 		})
 }
 
@@ -305,37 +369,17 @@ func fileOutlineTool(cwd string) tools.Tool {
 
 type getFunctionParams struct {
 	Name string `json:"name" description:"Function/method/class name"`
-	Path string `json:"path,omitempty" description:"File path (searches project with grep if omitted)"`
+	Path string `json:"path" description:"File path"`
 }
 
 func getFunctionTool(cwd string) tools.Tool {
-	return tools.Func("Get Function", "Get the full source of a function/method/class by name. Uses AST for TS/JS, brace-matching for others.", "get_function",
+	return tools.Func("Get Function", "Get the full source of a named function/method/class from a file.", "get_function",
 		func(r tools.Runner, p getFunctionParams) tools.Result {
-			// Try AST indexer
-			filePath := ""
-			if p.Path != "" { filePath = resolvePath(cwd, p.Path) }
-			if idx := indexer.ForFile(filePath); idx != nil && filePath != "" {
-				syms, err := idx.FindSymbol(p.Name, filePath)
-				if err == nil && len(syms) > 0 {
-					s := syms[0]
-					return tools.SuccessFromString(fmt.Sprintf("%s:%d-%d (%s)\n\n%s", s.FilePath, s.StartLine, s.EndLine, s.Kind, s.Source))
-				}
-			}
-
-			if p.Path == "" {
-				gctx, gcancel := context.WithTimeout(r.Context(), toolTimeout)
-				defer gcancel()
-				cmd := exec.CommandContext(gctx, "grep", "-rn", "--include=*.go", "--include=*.ts", "--include=*.js",
-					"-E", fmt.Sprintf(`\b%s\b`, p.Name), cwd)
-				out, _ := cmd.Output()
-				if len(out) == 0 { return tools.SuccessFromString(fmt.Sprintf("Symbol %q not found.", p.Name)) }
-				lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-				if len(lines) > maxGrepPreview { lines = lines[:maxGrepPreview] }
-				return tools.SuccessFromString("References:\n" + strings.Join(lines, "\n"))
-			}
 			target := resolvePath(cwd, p.Path)
 			data, err := os.ReadFile(target)
-			if err != nil { return tools.Error(err) }
+			if err != nil {
+				return tools.Error(err)
+			}
 			lines := strings.Split(string(data), "\n")
 			pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(p.Name) + `\b`)
 			for i, line := range lines {
@@ -348,264 +392,369 @@ func getFunctionTool(cwd string) tools.Tool {
 		})
 }
 
-// ── get_imports ─────────────────────────────────────────────────────────────
+// ── callers ────────────────────────────────────────────────────────────────
 
-type getImportsParams struct {
-	Path string `json:"path" description:"File path"`
+type callersParams struct {
+	Name string `json:"name" description:"Function/symbol name to find call sites for"`
+	Path string `json:"path,omitempty" description:"Directory or file to search (default: .)"`
 }
 
-func getImportsTool(cwd string) tools.Tool {
-	return tools.Func("Get Imports", "Get just the import block from a file.", "get_imports",
-		func(r tools.Runner, p getImportsParams) tools.Result {
-			target := resolvePath(cwd, p.Path)
-			data, err := os.ReadFile(target)
-			if err != nil { return tools.Error(err) }
-			lines := strings.Split(string(data), "\n")
-			var imports []string
-			inBlock := false
-			for i, line := range lines {
-				trimmed := strings.TrimSpace(line)
-				if inBlock {
-					imports = append(imports, fmt.Sprintf("%d\t%s", i+1, line))
-					if trimmed == ")" || strings.HasSuffix(trimmed, ";") || strings.Contains(trimmed, "from ") { inBlock = false }
+func callersTool(cwd string) tools.Tool {
+	return tools.Func("Callers", "Find all call sites of a function. Returns file:line and the calling line snippet — not the full function body. Use this to understand usage patterns and blast radius before changing a function.", "callers",
+		func(r tools.Runner, p callersParams) tools.Result {
+			searchPath := cwd
+			if p.Path != "" {
+				searchPath = resolvePath(cwd, p.Path)
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), toolTimeout)
+			defer cancel()
+
+			// Grep for all occurrences of the name
+			cmd := exec.CommandContext(ctx, "grep", "-rn", "--", p.Name, searchPath)
+			out, err := cmd.Output()
+			if (err != nil && len(out) == 0) || len(out) == 0 {
+				return tools.SuccessFromString(fmt.Sprintf("No call sites found for %q.", p.Name))
+			}
+
+			// Get definition locations via ctags so we can exclude them
+			defLines := map[string]bool{}
+			if entries, cerr := runCtags(ctx, searchPath); cerr == nil {
+				for _, e := range entries {
+					if strings.EqualFold(e.Name, p.Name) {
+						defLines[fmt.Sprintf("%s:%d", e.Path, e.Line)] = true
+					}
+				}
+			}
+
+			var callSites []string
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if line == "" {
 					continue
 				}
-				if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "import(") {
-					imports = append(imports, fmt.Sprintf("%d\t%s", i+1, line))
-					if trimmed == "import (" || (!strings.Contains(trimmed, "from ") && !strings.HasSuffix(trimmed, ";") && !strings.HasSuffix(trimmed, `"`)) {
-						inBlock = true
-					}
+				parts := strings.SplitN(line, ":", 3)
+				if len(parts) < 3 {
+					continue
 				}
+				file, lineNum, content := parts[0], parts[1], strings.TrimSpace(parts[2])
+
+				// Skip definition lines (by ctags lookup or by regex)
+				if defLines[file+":"+lineNum] {
+					continue
+				}
+				if funcStartRe.MatchString(content) && strings.Contains(content, p.Name) {
+					continue
+				}
+				// Skip comment-only lines
+				if isCommentLine(content) {
+					continue
+				}
+				// Skip import/require lines — not call sites
+				if isImportLine(content) {
+					continue
+				}
+				// Must look like a call: name followed by ( somewhere on the line
+				callRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(p.Name) + `\s*[(\[]`)
+				if !callRe.MatchString(line) {
+					continue
+				}
+
+				rel, _ := filepath.Rel(cwd, file)
+				if rel == "" {
+					rel = file
+				}
+				// Trim content to keep output compact
+				if len(content) > 120 {
+					content = content[:120] + "…"
+				}
+				callSites = append(callSites, fmt.Sprintf("%s:%s\t%s", rel, lineNum, content))
 			}
-			if len(imports) == 0 { return tools.SuccessFromString("No imports found.") }
-			return tools.SuccessFromString(strings.Join(imports, "\n"))
+
+			if len(callSites) == 0 {
+				return tools.SuccessFromString(fmt.Sprintf("No call sites found for %q (only definitions/imports).", p.Name))
+			}
+			if len(callSites) > maxSearchResults {
+				callSites = callSites[:maxSearchResults]
+			}
+			return tools.SuccessFromString(strings.Join(callSites, "\n"))
 		})
 }
 
-// ── get_type ───────────────────────────────────────────────────────────────
-
-type getTypeParams struct {
-	Name string `json:"name" description:"Type name"`
-	Path string `json:"path,omitempty" description:"File path (searches with grep if omitted)"`
+// isCommentLine returns true if the trimmed line is a comment in common languages.
+func isCommentLine(s string) bool {
+	return strings.HasPrefix(s, "//") || strings.HasPrefix(s, "#") ||
+		strings.HasPrefix(s, "*") || strings.HasPrefix(s, "/*") ||
+		strings.HasPrefix(s, "--")
 }
 
-func getTypeTool(cwd string) tools.Tool {
-	return tools.Func("Get Type", "Get a struct/interface/type definition by name, plus its methods. Uses AST for TS/JS.", "get_type",
-		func(r tools.Runner, p getTypeParams) tools.Result {
-			// Try AST indexer
-			filePath := ""
-			if p.Path != "" { filePath = resolvePath(cwd, p.Path) }
-			if idx := indexer.ForFile(filePath); idx != nil && filePath != "" {
-				syms, err := idx.FindSymbol(p.Name, filePath)
-				if err == nil && len(syms) > 0 {
-					var parts []string
-					for _, s := range syms {
-						parts = append(parts, fmt.Sprintf("%s:%d-%d (%s)\n\n%s", s.FilePath, s.StartLine, s.EndLine, s.Kind, s.Source))
-					}
-					return tools.SuccessFromString(strings.Join(parts, "\n\n---\n\n"))
-				}
-			}
+// isImportLine returns true if the line is an import/require statement.
+func isImportLine(s string) bool {
+	return strings.HasPrefix(s, "import ") || strings.HasPrefix(s, "from ") ||
+		strings.Contains(s, "require(") || strings.HasPrefix(s, "use ")
+}
 
-			if p.Path == "" {
-				gctx, gcancel := context.WithTimeout(r.Context(), toolTimeout)
-				defer gcancel()
-				cmd := exec.CommandContext(gctx, "grep", "-rn", "--include=*.go",
-					fmt.Sprintf("^type %s ", p.Name), cwd)
-				out, _ := cmd.Output()
-				if len(out) == 0 { return tools.SuccessFromString(fmt.Sprintf("Type %q not found.", p.Name)) }
-				return tools.SuccessFromString(strings.TrimSpace(string(out)))
-			}
+// ── callees ────────────────────────────────────────────────────────────────
+
+type calleesParams struct {
+	Name string `json:"name" description:"Function name"`
+	Path string `json:"path" description:"File containing the function"`
+}
+
+func calleesTool(cwd string) tools.Tool {
+	return tools.Func("Callees", "List functions called by the named function. Returns names and their definition locations — no source. Use to understand what a function depends on before modifying it.", "callees",
+		func(r tools.Runner, p calleesParams) tools.Result {
 			target := resolvePath(cwd, p.Path)
 			data, err := os.ReadFile(target)
-			if err != nil { return tools.Error(err) }
+			if err != nil {
+				return tools.Error(err)
+			}
 			lines := strings.Split(string(data), "\n")
-			typeRe := regexp.MustCompile(fmt.Sprintf(`^type\s+%s\b`, regexp.QuoteMeta(p.Name)))
+
+			// Find the function body
+			pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(p.Name) + `\b`)
+			startIdx := -1
 			for i, line := range lines {
-				if typeRe.MatchString(line) {
-					block := extractBraceBlock(lines, i, maxTypeBlockLines)
-					return tools.SuccessFromString(strings.Join(block, "\n"))
+				if pattern.MatchString(line) && funcStartRe.MatchString(line) {
+					startIdx = i
+					break
 				}
 			}
-			return tools.SuccessFromString(fmt.Sprintf("Type %q not found.", p.Name))
+			if startIdx < 0 {
+				return tools.SuccessFromString(fmt.Sprintf("Function %q not found in %s", p.Name, target))
+			}
+			endIdx, found := findFunctionEnd(lines, startIdx)
+			if !found {
+				endIdx = len(lines)
+			}
+			body := lines[startIdx:endIdx]
+
+			// Extract call expressions: word followed by (
+			callRe := regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+			// Keywords to skip
+			keywords := map[string]bool{
+				"if": true, "for": true, "while": true, "switch": true,
+				"func": true, "function": true, "def": true, "class": true,
+				"return": true, "new": true, "type": true, "var": true,
+				"const": true, "let": true, "else": true, "case": true,
+				p.Name: true, // don't list self
+			}
+
+			seen := map[string]bool{}
+			var callees []string
+			for _, line := range body {
+				trimmed := strings.TrimSpace(line)
+				if isCommentLine(trimmed) {
+					continue
+				}
+				for _, m := range callRe.FindAllStringSubmatch(trimmed, -1) {
+					name := m[1]
+					if keywords[name] || seen[name] {
+						continue
+					}
+					seen[name] = true
+					callees = append(callees, name)
+				}
+			}
+
+			if len(callees) == 0 {
+				return tools.SuccessFromString(fmt.Sprintf("%s calls no other functions.", p.Name))
+			}
+
+			// Look up definition locations for each callee
+			ctx, cancel := context.WithTimeout(r.Context(), toolTimeout)
+			defer cancel()
+			entries, _ := runCtags(ctx, filepath.Dir(target))
+
+			defMap := map[string]string{}
+			for _, e := range entries {
+				rel, _ := filepath.Rel(cwd, e.Path)
+				if rel == "" {
+					rel = e.Path
+				}
+				defMap[e.Name] = fmt.Sprintf("%s:%d", rel, e.Line)
+			}
+
+			var lines2 []string
+			for _, name := range callees {
+				if loc, ok := defMap[name]; ok {
+					lines2 = append(lines2, fmt.Sprintf("%s\t%s", name, loc))
+				} else {
+					lines2 = append(lines2, name) // stdlib or external
+				}
+			}
+			return tools.SuccessFromString(strings.Join(lines2, "\n"))
 		})
 }
 
-// ── find_references ────────────────────────────────────────────────────────
+// ── symbol_context ─────────────────────────────────────────────────────────
 
-type findReferencesParams struct {
-	Name     string `json:"name" description:"Symbol name"`
+type symbolContextParams struct {
+	Name string `json:"name" description:"Symbol name (exact or partial)"`
+	Path string `json:"path,omitempty" description:"Narrow search to this file or directory"`
+}
+
+func symbolContextTool(cwd string) tools.Tool {
+	return tools.Func("Symbol Context", "Orientation snapshot for a symbol: definition location, signature line, caller count, callee count. No source dumped. Use this first to decide whether to dig deeper.", "symbol_context",
+		func(r tools.Runner, p symbolContextParams) tools.Result {
+			searchPath := cwd
+			if p.Path != "" {
+				searchPath = resolvePath(cwd, p.Path)
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), toolTimeout)
+			defer cancel()
+
+			entries, err := runCtags(ctx, searchPath)
+			if err != nil || len(entries) == 0 {
+				return tools.SuccessFromString(fmt.Sprintf("Symbol %q not found (ctags unavailable or no matches).", p.Name))
+			}
+
+			nameLower := strings.ToLower(p.Name)
+			var matches []ctagsEntry
+			for _, e := range entries {
+				if strings.EqualFold(e.Name, p.Name) {
+					matches = append(matches, e) // exact first
+				} else if strings.Contains(strings.ToLower(e.Name), nameLower) {
+					matches = append(matches, e)
+				}
+			}
+			if len(matches) == 0 {
+				return tools.SuccessFromString(fmt.Sprintf("Symbol %q not found.", p.Name))
+			}
+
+			// Deduplicate to exact matches if any exist
+			var exact []ctagsEntry
+			for _, e := range matches {
+				if strings.EqualFold(e.Name, p.Name) {
+					exact = append(exact, e)
+				}
+			}
+			if len(exact) > 0 {
+				matches = exact
+			}
+
+			var sb strings.Builder
+			for _, e := range matches {
+				rel, _ := filepath.Rel(cwd, e.Path)
+				if rel == "" {
+					rel = e.Path
+				}
+
+				// Signature: the pattern field from ctags is the matched line
+				sig := strings.TrimSpace(e.Pattern)
+				sig = strings.TrimPrefix(sig, "/^")
+				sig = strings.TrimSuffix(sig, "$/")
+				sig = strings.TrimSpace(sig)
+				if len(sig) > 100 {
+					sig = sig[:100] + "…"
+				}
+
+				loc := fmt.Sprintf("%s:%d", rel, e.Line)
+				if e.End > 0 {
+					loc = fmt.Sprintf("%s:%d-%d", rel, e.Line, e.End)
+				}
+
+				sb.WriteString(fmt.Sprintf("symbol:  %s (%s)\n", e.Name, e.Kind))
+				sb.WriteString(fmt.Sprintf("loc:     %s\n", loc))
+				sb.WriteString(fmt.Sprintf("sig:     %s\n", sig))
+
+				// Count callers (grep, fast)
+				callerCount := 0
+				cmd := exec.CommandContext(ctx, "grep", "-r", "--", e.Name, searchPath)
+				if out, gerr := cmd.Output(); gerr == nil {
+					callRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(e.Name) + `\s*[(\[]`)
+					for _, line := range strings.Split(string(out), "\n") {
+						parts := strings.SplitN(line, ":", 3)
+						if len(parts) < 3 {
+							continue
+						}
+						content := strings.TrimSpace(parts[2])
+						if isCommentLine(content) || isImportLine(content) {
+							continue
+						}
+						if callRe.MatchString(line) && parts[0] != e.Path {
+							callerCount++
+						}
+					}
+				}
+				sb.WriteString(fmt.Sprintf("callers: %d\n", callerCount))
+
+				// Count callees from body
+				calleeCount := 0
+				if e.End > 0 {
+					if fileData, ferr := os.ReadFile(e.Path); ferr == nil {
+						fileLines := strings.Split(string(fileData), "\n")
+						start, end := e.Line-1, e.End
+						if end > len(fileLines) {
+							end = len(fileLines)
+						}
+						callRe2 := regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+						seen := map[string]bool{e.Name: true}
+						keywords := map[string]bool{"if": true, "for": true, "while": true, "switch": true, "func": true, "function": true, "def": true, "return": true, "new": true}
+						for _, fl := range fileLines[start:end] {
+							if isCommentLine(strings.TrimSpace(fl)) {
+								continue
+							}
+							for _, m := range callRe2.FindAllStringSubmatch(fl, -1) {
+								n := m[1]
+								if !keywords[n] && !seen[n] {
+									seen[n] = true
+									calleeCount++
+								}
+							}
+						}
+					}
+				}
+				sb.WriteString(fmt.Sprintf("callees: %d\n", calleeCount))
+
+				if len(matches) > 1 {
+					sb.WriteString("---\n")
+				}
+			}
+
+			return tools.SuccessFromString(strings.TrimRight(sb.String(), "\n"))
+		})
+}
+
+// ── grep_files ─────────────────────────────────────────────────────────────
+
+type grepFilesParams struct {
+	Pattern  string `json:"pattern" description:"Regex pattern to search for"`
 	Path     string `json:"path,omitempty" description:"Search root (default: .)"`
 	FileGlob string `json:"file_glob,omitempty" description:"File filter, e.g. '*.go'"`
 }
 
-func findReferencesTool(cwd string) tools.Tool {
-	return tools.Func("Find References", "Find all references to a symbol. Returns compact file:line pairs.", "find_references",
-		func(r tools.Runner, p findReferencesParams) tools.Result {
+func grepFilesTool(cwd string) tools.Tool {
+	return tools.Func("Grep Files", "Find which files contain a pattern — file paths only, no line content. Much cheaper than search_code when you just need to know if/where something exists.", "grep_files",
+		func(r tools.Runner, p grepFilesParams) tools.Result {
 			searchPath := cwd
-			if p.Path != "" { searchPath = resolvePath(cwd, p.Path) }
-			args := []string{"-rn", "-w"}
-			if p.FileGlob != "" { args = append(args, "--include="+p.FileGlob) }
-			args = append(args, "--", p.Name, searchPath)
+			if p.Path != "" {
+				searchPath = resolvePath(cwd, p.Path)
+			}
+			args := []string{"-rl"}
+			if p.FileGlob != "" {
+				args = append(args, "--include="+p.FileGlob)
+			}
+			args = append(args, "--", p.Pattern, searchPath)
 			ctx, cancel := context.WithTimeout(r.Context(), toolTimeout)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "grep", args...)
 			out, err := cmd.Output()
-			if err != nil { return tools.SuccessFromString("No references found.") }
-			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-			if len(lines) > maxReferences { lines = lines[:maxReferences] }
-			var refs []string
-			for _, line := range lines {
-				parts := strings.SplitN(line, ":", 3)
-				if len(parts) >= 2 { refs = append(refs, parts[0]+":"+parts[1]) }
+			if err != nil || len(out) == 0 {
+				return tools.SuccessFromString("No files match.")
 			}
-			if len(refs) == 0 { return tools.SuccessFromString("No references found.") }
-			return tools.SuccessFromString(strings.Join(refs, "\n"))
-		})
-}
-
-// ── file_stats ─────────────────────────────────────────────────────────────
-
-type fileStatsParams struct {
-	Path string `json:"path" description:"File path"`
-}
-
-func fileStatsTool(cwd string) tools.Tool {
-	return tools.Func("File Stats", "Get file metadata: line count, size, last modified. No content returned.", "file_stats",
-		func(r tools.Runner, p fileStatsParams) tools.Result {
-			target := resolvePath(cwd, p.Path)
-			info, err := os.Stat(target)
-			if err != nil { return tools.Error(err) }
-			lineCount, err := countLines(target)
-			if err != nil { return tools.Error(err) }
-			return tools.SuccessFromString(fmt.Sprintf("Lines: %d | Size: %dB | Modified: %s", lineCount, info.Size(), info.ModTime().Format("2006-01-02T15:04:05Z")))
-		})
-}
-
-// countLines counts newlines in a file using a streaming buffer to avoid
-// reading the entire file into memory.
-func countLines(path string) (int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	buf := make([]byte, 32*1024)
-	count := 0
-	for {
-		n, err := f.Read(buf)
-		for i := 0; i < n; i++ {
-			if buf[i] == '\n' {
-				count++
+			var relPaths []string
+			for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				rel, _ := filepath.Rel(cwd, f)
+				if rel == "" {
+					rel = f
+				}
+				relPaths = append(relPaths, rel)
 			}
-		}
-		if err != nil {
-			break
-		}
-	}
-	return count + 1, nil // +1 for last line without trailing newline
-}
-
-// ── project_outline ────────────────────────────────────────────────────────
-
-type projectOutlineParams struct {
-	Path string `json:"path" description:"Project root directory"`
-}
-
-func projectOutlineTool(cwd string) tools.Tool {
-	return tools.Func("Project Outline", "Full project symbol map. AST-powered for TS/JS, regex for others. No source — just names, kinds, lines, exports.", "project_outline",
-		func(r tools.Runner, p projectOutlineParams) tools.Result {
-			root := resolvePath(cwd, p.Path)
-
-			// Try AST indexers first for a full index
-			var astResult strings.Builder
-			for _, idx := range indexer.All() {
-				report, err := idx.IndexDir(root, 4)
-				if err != nil || len(report.Symbols) == 0 { continue }
-
-				// Group by file
-				byFile := map[string][]indexer.Symbol{}
-				for _, s := range report.Symbols {
-					byFile[s.FilePath] = append(byFile[s.FilePath], s)
-				}
-				for file, syms := range byFile {
-					rel, _ := filepath.Rel(root, file)
-					if rel == "" { rel = file }
-					astResult.WriteString(fmt.Sprintf("\n── %s ──\n", rel))
-					for _, s := range syms {
-						exp := ""
-						if s.ExportStatus == "exported" { exp = " [exp]" }
-						if s.ExportStatus == "default" { exp = " [default]" }
-						astResult.WriteString(fmt.Sprintf("  %d-%d\t%s\t%s%s\n", s.StartLine, s.EndLine, s.Kind, s.Name, exp))
-					}
-				}
-			}
-
-			// Regex fallback for non-indexed files
-			const maxOutlineDepth = 4
-			const maxOutlineSymbols = 2000
-			symbolCount := 0
-			var regexResult strings.Builder
-			_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-				if err != nil { return nil }
-				if symbolCount >= maxOutlineSymbols { return filepath.SkipAll }
-				name := info.Name()
-				if info.IsDir() {
-					if strings.HasPrefix(name, ".") || name == "node_modules" || name == "dist" || name == "vendor" { return filepath.SkipDir }
-					rel, _ := filepath.Rel(root, path)
-					if rel != "" && strings.Count(rel, string(filepath.Separator)) >= maxOutlineDepth {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				// Skip files already handled by AST indexer
-				if indexer.ForFile(path) != nil { return nil }
-				ext := filepath.Ext(name)
-				if ext != ".go" && ext != ".py" && ext != ".rs" && ext != ".c" && ext != ".cpp" && ext != ".java" { return nil }
-				data, err := os.ReadFile(path)
-				if err != nil { return nil }
-				lines := strings.Split(string(data), "\n")
-				var sigs []string
-				for i, line := range lines {
-					if sigRe.MatchString(strings.TrimSpace(line)) {
-						sigs = append(sigs, fmt.Sprintf("  %d\t%s", i+1, strings.TrimSpace(line)))
-						symbolCount++
-						if symbolCount >= maxOutlineSymbols { break }
-					}
-				}
-				if len(sigs) > 0 {
-					rel, _ := filepath.Rel(root, path)
-					if rel == "" { rel = path }
-					regexResult.WriteString(fmt.Sprintf("\n── %s ──\n", rel))
-					regexResult.WriteString(strings.Join(sigs, "\n"))
-					regexResult.WriteString("\n")
-				}
-				return nil
-			})
-
-			out := astResult.String() + regexResult.String()
-			if out == "" { return tools.SuccessFromString("No symbols found.") }
-			return tools.SuccessFromString(out)
+			return tools.SuccessFromString(strings.Join(relPaths, "\n"))
 		})
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-// findFunctionEnd finds the closing brace of a function starting at the given line.
-// Returns the line index after the closing brace and whether it was found.
-func findFunctionEnd(lines []string, start int) (end int, found bool) {
-	depth := 0
-	started := false
-	for j := start; j < len(lines); j++ {
-		countBraces(lines[j], &depth, &started)
-		if started && depth <= 0 {
-			return j + 1, true
-		}
-	}
-	return 0, false
-}
-
-// extractBraceBlock extracts a brace-delimited block starting from the given line.
-// It skips braces inside strings and single-line comments to avoid false matches.
 func extractBraceBlock(lines []string, start, maxLines int) []string {
 	var block []string
 	depth := 0
@@ -624,8 +773,18 @@ func extractBraceBlock(lines []string, start, maxLines int) []string {
 	return block
 }
 
-// countBraces counts net brace depth on a line, skipping braces inside
-// strings (single/double/backtick) and line comments (// and #).
+func findFunctionEnd(lines []string, start int) (end int, found bool) {
+	depth := 0
+	started := false
+	for j := start; j < len(lines); j++ {
+		countBraces(lines[j], &depth, &started)
+		if started && depth <= 0 {
+			return j + 1, true
+		}
+	}
+	return 0, false
+}
+
 func countBraces(line string, depth *int, started *bool) {
 	inString := rune(0)
 	escaped := false
@@ -644,7 +803,6 @@ func countBraces(line string, depth *int, started *bool) {
 			}
 			continue
 		}
-		// Line comment — stop processing this line
 		if ch == '/' && i+1 < len(line) && line[i+1] == '/' {
 			return
 		}

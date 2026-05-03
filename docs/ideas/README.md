@@ -14,6 +14,5 @@ Read [design-principles.md](design-principles.md) first — it's the vibe check.
 | [Task Templates](task-templates.md) | Reusable prompts | I keep typing the same requests |
 | [Git Workflow](git-workflow.md) | Git without leaving MENACE | One screen. Full control. |
 | [Custom Tools](custom-tools.md) | Give agents project-specific capabilities | Built-in tools aren't enough for real workflows |
-| [Language Indexers](multi-language-indexers.md) | Better code intelligence for more languages | Regex fallback works but misses a lot |
 | [Own LLM Layer](own-llm-layer.md) | Replace go-llms with our own provider layer | Own your core, don't rent it |
 | [Rate Limiting](rate-limiting.md) | Graceful throttling, auto-retry, proactive backoff | Hitting a 429 shouldn't kill a task |

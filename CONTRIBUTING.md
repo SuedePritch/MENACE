@@ -22,7 +22,7 @@ YourGitHubHandle - what you did
 
 **No drive-by refactors.** You're here to fix a bug? Fix the bug. Don't touch anything else. Don't rename variables, don't reorganize imports, don't "clean up" some code you were reading. You think something needs refactoring? Cool, that's its own PR.
 
-**Tests or it didn't happen.** Changed behavior? Prove it works. There are tests for the orchestrator, engine, store, config, indexer, tools, and TUI workflows. Follow the patterns that are already there.
+**Tests or it didn't happen.** Changed behavior? Prove it works. There are tests for the orchestrator, engine, store, config, tools, and TUI workflows. Follow the patterns that are already there.
 
 **Match the style.** This codebase is consistent. Read the code around what you're changing and write code that looks like it belongs. If yours sticks out, I'm going to ask you to redo it.
 
@@ -49,7 +49,7 @@ Go 1.25+ and Git. That's the whole stack.
 
 ## Structure
 
-`tui/` is the terminal UI, `engine/` is orchestration, `agent/` is LLM interaction, `store/` is persistence, `config/` is configuration, `indexer/` is code intelligence. Clean boundaries. [ARCHITECTURE.md](ARCHITECTURE.md) has the full map if you need it.
+`tui/` is the terminal UI, `engine/` is orchestration, `agent/` is LLM interaction and navigation tools, `store/` is persistence, `config/` is configuration. Clean boundaries. [ARCHITECTURE.md](ARCHITECTURE.md) has the full map if you need it.
 
 ## Ideas
 

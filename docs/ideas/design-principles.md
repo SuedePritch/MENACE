@@ -26,4 +26,4 @@ MENACE should be the only thing open. If you're switching to another terminal to
 
 ## Composable, not monolithic
 
-Unix philosophy where it makes sense. Hooks let users wire MENACE into their existing tools. External indexers let anyone add language support. Prompts are just markdown files. The system should have clear extension points rather than trying to absorb the entire universe.
+Unix philosophy where it makes sense. Hooks let users wire MENACE into their existing tools. Prompts are just markdown files. The system should have clear extension points rather than trying to absorb the entire universe.

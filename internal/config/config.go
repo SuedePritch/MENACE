@@ -12,19 +12,13 @@ import (
 )
 
 type MenaceConfig struct {
-	Concurrency   int              `json:"concurrency"`
-	MaxRetry      int              `json:"max_retry"`
-	ChatCharLimit int              `json:"chat_char_limit"`
-	ChatMaxHeight int              `json:"chat_max_height"`
-	OllamaBaseURL string           `json:"ollama_base_url"`
-	Theme         string           `json:"theme"`
-	Keys          KeysConfig       `json:"keys"`
-	Indexers      []IndexerConfig  `json:"indexers,omitempty"`
-}
-
-// IndexerConfig points to an external indexer binary.
-type IndexerConfig struct {
-	Binary string `json:"binary"` // path to the indexer binary
+	Concurrency   int        `json:"concurrency"`
+	MaxRetry      int        `json:"max_retry"`
+	ChatCharLimit int        `json:"chat_char_limit"`
+	ChatMaxHeight int        `json:"chat_max_height"`
+	OllamaBaseURL string     `json:"ollama_base_url"`
+	Theme         string     `json:"theme"`
+	Keys          KeysConfig `json:"keys"`
 }
 
 type KeysConfig struct {

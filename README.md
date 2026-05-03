@@ -14,7 +14,7 @@ MENACE removes the friction. You talk to an **Architect** to shape a plan, not t
 
 You review it. You approve it. **Workers** pick up the subtasks and execute them in parallel. No watching. No babysitting. Plan, approve, move on.
 
-- **Architect** — plans changes through AST-powered code intelligence tools
+- **Architect** — plans changes through purpose-built navigation tools
 - **Workers** — cheap/fast models (Gemini Flash Lite, GPT-4.1 Nano, local Ollama) that execute subtasks in parallel
 - **You** — always in control, never waiting
 
@@ -22,7 +22,7 @@ You review it. You approve it. **Workers** pick up the subtasks and execute them
 
 ## Features
 
-- **Code-aware planning** — pluggable AST indexing with built-in TS/JS support (tree-sitter), extensible to any language
+- **Token-efficient navigation** — purpose-built tools for symbol lookup, call graphs, and codebase exploration across any language (via ctags)
 - **Parallel execution** — conflict-aware scheduler runs multiple workers simultaneously without file collisions
 - **Proposal review** — approve, reject, or modify before any code is touched
 - **Diff inspection** — per-subtask git diffs captured and viewable in-app
@@ -31,7 +31,7 @@ You review it. You approve it. **Workers** pick up the subtasks and execute them
 - **Vim keybindings** — fully customizable themes, keys, and layout
 - **Theme system** — built-in themes, custom themes via TOML, or duplicate and edit with `$EDITOR`
 - **Token tracking** — cumulative token usage displayed in the banner
-- **Settings UI** — in-app settings modal for config, theme, auth, and indexer status
+- **Settings UI** — in-app settings modal for config, theme, and auth
 
 ---
 
@@ -67,6 +67,7 @@ You review it. You approve it. **Workers** pick up the subtasks and execute them
 
 - Go 1.25+
 - Git
+- [universal-ctags](https://github.com/universal-ctags/ctags) — `make install` handles this automatically
 
 ### Build
 
@@ -172,10 +173,7 @@ MENACE stores config in `config.json` in the app directory:
 {
   "concurrency": 3,
   "max_retry": 2,
-  "theme": "menace",
-  "indexers": [
-    {"binary": "/path/to/my-go-indexer"}
-  ]
+  "theme": "menace"
 }
 ```
 
@@ -215,66 +213,32 @@ panel_tasks = "queue"
 
 ---
 
-## AST Indexers
+## Navigation Tools
 
-MENACE ships with a built-in **TS/JS indexer** (tree-sitter) that gives the Architect proper code intelligence — accurate symbol extraction, export status, dependency tracking, source snippets.
+The Architect uses a purpose-built set of navigation tools designed to explore codebases token-efficiently. Rather than dumping file contents, each tool returns the minimum needed to decide what to look at next.
 
-For other languages, you can plug in **external indexers** — any binary that speaks a simple JSON protocol.
+| Tool | What it returns |
+|------|----------------|
+| `tree` | Directory structure at configurable depth |
+| `find_symbol` | `file:start-end  kind  name` — precise location, no source |
+| `symbol_context` | Definition location, signature, caller count, callee count |
+| `callers` | Call sites only — file:line + snippet, definitions filtered out |
+| `callees` | Functions called by a given function, locations only |
+| `get_function` | Full source of one named function |
+| `grep_files` | File paths containing a pattern — no line content |
+| `search_code` | Matching lines across files |
+| `read_file` | File contents, supports line ranges |
 
-### Protocol
+`find_symbol`, `symbol_context`, `callers`, and `callees` are powered by [universal-ctags](https://github.com/universal-ctags/ctags), which supports 100+ languages. Everything else is language-agnostic.
 
-An external indexer is a CLI binary that responds to 4 commands:
+Benchmarked against the MENACE codebase vs standard Claude Code tools (Read + Grep + Glob):
 
-```bash
-# What file types do you handle?
-./my-indexer extensions
-# → [".go", ".rs"]
-
-# List all symbols in a file
-./my-indexer symbols /path/to/file.go
-# → [{"name": "Foo", "kind": "function", "filePath": "...", "startLine": 1, "endLine": 10, "source": "func Foo() {...}"}]
-
-# Index an entire directory
-./my-indexer index /path/to/project
-# → {"symbols": [...], "tokenEstimate": 5000}
-
-# Find a symbol by name (optionally scoped to a file)
-./my-indexer find MyFunc /path/to/file.go
-# → [{"name": "MyFunc", ...}]
-```
-
-### Symbol Schema
-
-```json
-{
-  "name": "string",
-  "kind": "function|class|method|type|interface|enum",
-  "filePath": "string",
-  "startLine": 1,
-  "endLine": 10,
-  "source": "full source text",
-  "exportStatus": "exported|unexported|default",
-  "dependencies": ["calledFunction1", "calledFunction2"],
-  "dependents": ["callerFunction1"]
-}
-```
-
-### Configuration
-
-Add external indexers in `config.json`:
-
-```json
-{
-  "indexers": [
-    {"binary": "/usr/local/bin/go-indexer"},
-    {"binary": "./my-rust-indexer"}
-  ]
-}
-```
-
-On startup, each indexer is validated with a smoke test. The settings modal (`,`) shows indexer health status — green for working, red with error message for broken.
-
-For files with no indexer, tools fall back to regex-based extraction (works on any language, less accurate).
+| Scenario | Standard tools | MENACE tools | Improvement |
+|----------|---------------|-------------|-------------|
+| Find and read a specific function | 2,395 tok | 72 tok | **33x** |
+| Blast radius before changing a function | 5,597 tok | 52 tok | **108x** |
+| Refactor impact assessment | 8,841 tok | 286 tok | **31x** |
+| Security audit — touch points | 7,525 tok | 88 tok | **86x** |
 
 ---
 
@@ -282,7 +246,7 @@ For files with no indexer, tools fall back to regex-based extraction (works on a
 
 ```
 MENACE/
-├── main.go                    # Entry point, indexer registration
+├── main.go                    # Entry point
 ├── internal/
 │   ├── tui/                   # Terminal UI (Bubble Tea)
 │   │   ├── run.go             # Exported entry point
@@ -306,7 +270,7 @@ MENACE/
 │   │   └── util.go            # Text wrapping, ANSI stripping
 │   ├── agent/                 # LLM agent layer (go-llms)
 │   │   ├── agent.go           # Agent wrapper, provider factory, usage tracking
-│   │   ├── tools_read.go      # Read-only tools (architect): AST, grep, outline
+│   │   ├── tools_read.go      # Read-only tools (architect): navigation, grep, symbols
 │   │   └── tools_write.go     # Write tools (worker): edit, replace, insert
 │   ├── engine/                # Orchestration layer
 │   │   ├── architect.go       # Persistent architect process, proposal parsing
@@ -316,11 +280,6 @@ MENACE/
 │   │   ├── session.go         # Session creation
 │   │   ├── providers.go       # Provider presets + defaults
 │   │   └── models.go          # Live model fetching from APIs
-│   ├── indexer/               # Pluggable code intelligence
-│   │   ├── interface.go       # Indexer interface + Symbol type
-│   │   ├── registry.go        # Extension-based registry + health checks
-│   │   ├── builtin.go         # Built-in TS/JS adapter
-│   │   └── external.go        # External binary protocol
 │   ├── store/                 # SQLite persistence
 │   │   ├── store.go           # Schema, migrations, project methods
 │   │   ├── store_auth.go      # Auth (provider, model, keyring)
@@ -340,8 +299,7 @@ MENACE/
 │   ├── architect.md           # Architect system prompt (editable)
 │   └── worker.md              # Worker system prompt (editable)
 ├── themes/                    # Custom theme TOML files
-├── docs/ideas/                # Feature specs for contributors
-└── code-indexer/              # Standalone TS/JS indexer (tree-sitter)
+└── docs/ideas/                # Feature specs for contributors
 ```
 
 ---

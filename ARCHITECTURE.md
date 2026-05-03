@@ -58,16 +58,10 @@ Tasks, sessions, proposals, and chat history need to survive crashes and restart
     │  - Wraps go-llms provider abstraction    │
     │  - Streams events to TUI                 │
     │  - Read tools (architect) / Write tools  │
-    └──────┬───────────────────────────────────┘
-           │
-    ┌──────▼──────────────────────────────────┐
-    │  Indexer (internal/indexer/)              │
-    │  - Pluggable code intelligence           │
-    │  - Built-in: tree-sitter for TS/JS       │
-    │  - External: any binary implementing the │
-    │    indexer protocol                       │
-    │  - Regex fallback for other languages    │
-    └─────────────────────────────────────────┘
+    │  - Navigation: tree, find_symbol,        │
+    │    callers, callees, symbol_context      │
+    │  - ctags-backed, 100+ languages          │
+    └──────────────────────────────────────────┘
 ```
 
 ## Key Design Decisions
@@ -114,7 +108,6 @@ All tool file operations are resolved through `resolvePath()`, which ensures pat
 
 - **Themes**: TOML files in `themes/` with colors, banner art, and personality text. Per-project overrides via the settings modal. Duplicate and edit with `$EDITOR`.
 - **Keybindings**: Config-driven key overrides for normal, insert, and modal modes. Three keymaps (normal, insert, modal) with semantic action names.
-- **Indexers**: External binaries can provide code intelligence for additional languages via a JSON protocol.
 - **System prompts**: Editable markdown files in `prompts/` for architect and worker behavior.
 - **Config**: `config.json` for concurrency, retry limits, and other tuning parameters.
 

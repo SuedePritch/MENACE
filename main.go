@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"menace/internal/config"
-	"menace/internal/indexer"
 	mlog "menace/internal/log"
 	"menace/internal/store"
 	"menace/internal/tui"
@@ -43,24 +41,6 @@ func main() {
 	menaceDir := filepath.Dir(exe)
 	if _, err := os.Stat(filepath.Join(menaceDir, "prompts")); err != nil {
 		menaceDir = cwd
-	}
-
-	// Register built-in AST indexer (TS/JS via tree-sitter)
-	if err := indexer.Register(indexer.NewBuiltinTSIndexer()); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: built-in indexer failed validation: %v\n", err)
-	}
-
-	// Register external indexers from config
-	cfg := config.Load(menaceDir)
-	for _, ic := range cfg.Indexers {
-		ext, err := indexer.NewExternalIndexer(ic.Binary)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: external indexer %q: %v\n", ic.Binary, err)
-			continue
-		}
-		if err := indexer.Register(ext); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: external indexer %q failed validation: %v\n", ic.Binary, err)
-		}
 	}
 
 	mlog.Init(menaceDir)

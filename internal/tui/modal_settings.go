@@ -9,7 +9,6 @@ import (
 
 	"menace/internal/config"
 	"menace/internal/engine"
-	"menace/internal/indexer"
 	mlog "menace/internal/log"
 	"menace/internal/store"
 
@@ -442,20 +441,6 @@ func (sm *SettingsModal) View(w, h int) string {
 				} else {
 					lines = append(lines, indent+"      "+lipgloss.NewStyle().Foreground(ColorMuted).Render(pick))
 				}
-			}
-		}
-	}
-
-	// Indexer status section
-	idxStatuses := indexer.Statuses()
-	if len(idxStatuses) > 0 {
-		lines = append(lines, "")
-		lines = append(lines, indent+sectionStyle.Render("indexers"))
-		for _, s := range idxStatuses {
-			if s.Healthy {
-				lines = append(lines, indent+"  "+lipgloss.NewStyle().Foreground(ColorSuccess).Render("●")+" "+labelStyle.Render(s.Name))
-			} else {
-				lines = append(lines, indent+"  "+lipgloss.NewStyle().Foreground(ColorFail).Render("●")+" "+labelStyle.Render(s.Name)+"  "+lipgloss.NewStyle().Foreground(ColorFail).Render(s.Error))
 			}
 		}
 	}

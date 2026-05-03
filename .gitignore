@@ -19,3 +19,4 @@ tasks.yaml
 agents/*/auth.json
 agents/*/sessions/
 .pi/
+demo/

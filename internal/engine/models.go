@@ -244,8 +244,9 @@ func parseOpenAIModels(body []byte) ([]ModelOption, error) {
 func parseOllamaModels(body []byte) ([]ModelOption, error) {
 	var resp struct {
 		Models []struct {
-			Name string `json:"name"`
-			Size int64  `json:"size"`
+			Name  string `json:"name"`  // older Ollama versions
+			Model string `json:"model"` // newer Ollama versions
+			Size  int64  `json:"size"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -253,10 +254,16 @@ func parseOllamaModels(body []byte) ([]ModelOption, error) {
 	}
 	var models []ModelOption
 	for _, m := range resp.Models {
-		// Size in bytes, convert to human readable for description
+		id := m.Model
+		if id == "" {
+			id = m.Name
+		}
+		if id == "" {
+			continue
+		}
 		sizeGB := float64(m.Size) / (1024 * 1024 * 1024)
 		desc := fmt.Sprintf("%.1fGB", sizeGB)
-		models = append(models, ModelOption{ID: m.Name, Desc: desc})
+		models = append(models, ModelOption{ID: id, Desc: desc})
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	return models, nil

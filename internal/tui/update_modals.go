@@ -51,9 +51,9 @@ func (m model) handleSettingsModelChanged() (tea.Model, tea.Cmd) {
 			CWD:           m.project.cwd,
 			MenaceDir:     m.ts.dir,
 			ProjectID:     m.project.id,
-			ProviderName:  auth.Provider,
-			WorkerModel:   auth.WorkerModel,
-			APIKey:        auth.APIKey,
+			WorkerProvider: auth.WorkerProvider,
+			WorkerModel:    auth.WorkerModel,
+			WorkerAPIKey:   auth.WorkerAPIKey,
 			MaxConcurrent: m.ts.cfg.Concurrency,
 			MaxRetry:      m.ts.cfg.MaxRetry,
 		}, m.store, m.programRef.p)

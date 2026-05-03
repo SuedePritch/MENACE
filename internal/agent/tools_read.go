@@ -376,7 +376,7 @@ type getFunctionParams struct {
 }
 
 func getFunctionTool(cwd string) tools.Tool {
-	return tools.Func("Get Function", "Get the full source of a named function/method/class from a file.", "get_function",
+	return tools.Func("Get Function", "Get the full source of a named function/method/class from a file. 'name' must be the function name (e.g. 'MyFunc'), NOT a filename.", "get_function",
 		func(r tools.Runner, p getFunctionParams) tools.Result {
 			target := resolvePath(cwd, p.Path)
 			data, err := os.ReadFile(target)

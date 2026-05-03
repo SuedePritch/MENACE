@@ -14,17 +14,30 @@ import (
 )
 
 // setupModel encapsulates the provider/key/model setup flow.
-// Steps: 0=provider, 1=api key, 2=architect model, 3=worker model
+// Steps:
+//
+//	0 = architect provider selection
+//	1 = architect API key entry
+//	2 = architect model selection
+//	3 = worker provider selection
+//	4 = worker API key entry (skipped if same provider as architect or Ollama)
+//	5 = worker model selection
 type setupModel struct {
-	providerSel     int
-	step            int
-	key             string
-	architectSel    int
-	workerSel       int
+	// architect
+	archProviderSel int
 	architectModels []engine.ModelOption
-	workerModels    []engine.ModelOption
-	fetching        bool
-	store           *store.Store
+	architectSel    int
+	archKey         string
+
+	// worker
+	workerProviderSel int
+	workerModels      []engine.ModelOption
+	workerSel         int
+	workerKey         string
+
+	step     int
+	fetching bool
+	store    *store.Store
 }
 
 func newSetupModel(s *store.Store) setupModel {
@@ -39,6 +52,10 @@ type modelsFetchedMsg struct {
 	worker    []engine.ModelOption
 }
 
+type workerModelsFetchedMsg struct {
+	models []engine.ModelOption
+}
+
 func (sm setupModel) Update(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 	key := msg.String()
 
@@ -46,86 +63,92 @@ func (sm setupModel) Update(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 		return sm, tea.Quit
 	}
 
-	fetchModelsCmd := func(provider, apiKey string) tea.Cmd {
+	fetchArchModelsCmd := func(provider, apiKey string) tea.Cmd {
 		return func() tea.Msg {
 			a, w := engine.FetchModels(provider, apiKey)
 			return modelsFetchedMsg{architect: a, worker: w}
 		}
 	}
 
+	fetchWorkerModelsCmd := func(provider, apiKey string) tea.Cmd {
+		return func() tea.Msg {
+			_, w := engine.FetchModels(provider, apiKey)
+			return workerModelsFetchedMsg{models: w}
+		}
+	}
+
 	switch sm.step {
-	case 0: // Provider selection
+	case 0: // Architect provider selection
 		switch key {
 		case "j", "down":
-			if sm.providerSel < len(engine.ProviderPresets)-1 {
-				sm.providerSel++
+			if sm.archProviderSel < len(engine.ProviderPresets)-1 {
+				sm.archProviderSel++
 			}
 		case "k", "up":
-			if sm.providerSel > 0 {
-				sm.providerSel--
+			if sm.archProviderSel > 0 {
+				sm.archProviderSel--
 			}
 		case "enter":
-			preset := &engine.ProviderPresets[sm.providerSel]
+			preset := &engine.ProviderPresets[sm.archProviderSel]
 			if preset.ArchitectProvider == "ollama" {
 				if err := sm.store.SaveAPIKey("ollama", "ollama"); err != nil {
 					mlog.Error("SaveAPIKey", slog.String("err", err.Error()))
 				}
 				sm.fetching = true
-				return sm, fetchModelsCmd("ollama", "")
+				return sm, fetchArchModelsCmd("ollama", "")
 			}
 			if envKey := engine.ResolveAPIKeyFromEnv(preset.ArchitectProvider); envKey != "" {
 				if err := sm.store.SaveAPIKey(preset.ArchitectProvider, envKey); err != nil {
 					mlog.Error("SaveAPIKey", slog.String("err", err.Error()))
 				}
 				sm.fetching = true
-				return sm, fetchModelsCmd(preset.ArchitectProvider, envKey)
+				return sm, fetchArchModelsCmd(preset.ArchitectProvider, envKey)
 			}
 			if sm.store.HasAPIKey(preset.ArchitectProvider) {
 				apiKey := sm.store.GetAPIKey(preset.ArchitectProvider)
 				sm.fetching = true
-				return sm, fetchModelsCmd(preset.ArchitectProvider, apiKey)
+				return sm, fetchArchModelsCmd(preset.ArchitectProvider, apiKey)
 			}
 			sm.step = 1
-			sm.key = ""
+			sm.archKey = ""
 		}
 		return sm, nil
 
-	case 1: // API key entry
+	case 1: // Architect API key entry
 		switch key {
 		case "esc", "escape":
 			sm.step = 0
-			sm.key = ""
+			sm.archKey = ""
 		case "enter":
-			apiKey := strings.TrimSpace(sm.key)
+			apiKey := strings.TrimSpace(sm.archKey)
 			if apiKey == "" {
 				return sm, nil
 			}
-			preset := &engine.ProviderPresets[sm.providerSel]
+			preset := &engine.ProviderPresets[sm.archProviderSel]
 			if err := sm.store.SaveAPIKey(preset.ArchitectProvider, apiKey); err != nil {
 				mlog.Error("SaveAPIKey", slog.String("err", err.Error()))
 			}
 			sm.fetching = true
-			return sm, fetchModelsCmd(preset.ArchitectProvider, apiKey)
+			return sm, fetchArchModelsCmd(preset.ArchitectProvider, apiKey)
 		case "backspace":
-			if len(sm.key) > 0 {
-				sm.key = sm.key[:len(sm.key)-1]
+			if len(sm.archKey) > 0 {
+				sm.archKey = sm.archKey[:len(sm.archKey)-1]
 			}
 		case "ctrl+u":
-			sm.key = ""
+			sm.archKey = ""
 		default:
 			if len(msg.Runes) > 0 {
-				sm.key += string(msg.Runes)
+				sm.archKey += string(msg.Runes)
 			}
 		}
 		return sm, nil
 
 	case 2: // Architect model selection
-		models := sm.architectModels
 		switch key {
 		case "esc", "escape":
 			sm.step = 0
 		case "j", "down":
-			if sm.architectSel < len(models)-1 {
+			if sm.architectSel < len(sm.architectModels)-1 {
 				sm.architectSel++
 			}
 		case "k", "up":
@@ -134,17 +157,93 @@ func (sm setupModel) Update(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 			}
 		case "enter":
 			sm.step = 3
-			sm.workerSel = 0
+			sm.workerProviderSel = sm.archProviderSel // default same as architect
 		}
 		return sm, nil
 
-	case 3: // Worker model selection
-		models := sm.workerModels
+	case 3: // Worker provider selection
 		switch key {
 		case "esc", "escape":
 			sm.step = 2
 		case "j", "down":
-			if sm.workerSel < len(models)-1 {
+			if sm.workerProviderSel < len(engine.ProviderPresets)-1 {
+				sm.workerProviderSel++
+			}
+		case "k", "up":
+			if sm.workerProviderSel > 0 {
+				sm.workerProviderSel--
+			}
+		case "enter":
+			workerPreset := &engine.ProviderPresets[sm.workerProviderSel]
+			archPreset := &engine.ProviderPresets[sm.archProviderSel]
+			sameProvider := workerPreset.ArchitectProvider == archPreset.ArchitectProvider
+
+			if workerPreset.ArchitectProvider == "ollama" {
+				if err := sm.store.SaveAPIKey("ollama", "ollama"); err != nil {
+					mlog.Error("SaveAPIKey", slog.String("err", err.Error()))
+				}
+				sm.fetching = true
+				return sm, fetchWorkerModelsCmd("ollama", "")
+			}
+			if sameProvider {
+				// Already have the key — go straight to model selection.
+				apiKey := sm.store.GetAPIKey(archPreset.ArchitectProvider)
+				sm.fetching = true
+				return sm, fetchWorkerModelsCmd(workerPreset.ArchitectProvider, apiKey)
+			}
+			if envKey := engine.ResolveAPIKeyFromEnv(workerPreset.ArchitectProvider); envKey != "" {
+				if err := sm.store.SaveAPIKey(workerPreset.ArchitectProvider, envKey); err != nil {
+					mlog.Error("SaveAPIKey", slog.String("err", err.Error()))
+				}
+				sm.fetching = true
+				return sm, fetchWorkerModelsCmd(workerPreset.ArchitectProvider, envKey)
+			}
+			if sm.store.HasAPIKey(workerPreset.ArchitectProvider) {
+				apiKey := sm.store.GetAPIKey(workerPreset.ArchitectProvider)
+				sm.fetching = true
+				return sm, fetchWorkerModelsCmd(workerPreset.ArchitectProvider, apiKey)
+			}
+			// Need a key for the different provider.
+			sm.step = 4
+			sm.workerKey = ""
+		}
+		return sm, nil
+
+	case 4: // Worker API key entry (different provider only)
+		switch key {
+		case "esc", "escape":
+			sm.step = 3
+			sm.workerKey = ""
+		case "enter":
+			apiKey := strings.TrimSpace(sm.workerKey)
+			if apiKey == "" {
+				return sm, nil
+			}
+			preset := &engine.ProviderPresets[sm.workerProviderSel]
+			if err := sm.store.SaveAPIKey(preset.ArchitectProvider, apiKey); err != nil {
+				mlog.Error("SaveAPIKey", slog.String("err", err.Error()))
+			}
+			sm.fetching = true
+			return sm, fetchWorkerModelsCmd(preset.ArchitectProvider, apiKey)
+		case "backspace":
+			if len(sm.workerKey) > 0 {
+				sm.workerKey = sm.workerKey[:len(sm.workerKey)-1]
+			}
+		case "ctrl+u":
+			sm.workerKey = ""
+		default:
+			if len(msg.Runes) > 0 {
+				sm.workerKey += string(msg.Runes)
+			}
+		}
+		return sm, nil
+
+	case 5: // Worker model selection
+		switch key {
+		case "esc", "escape":
+			sm.step = 3
+		case "j", "down":
+			if sm.workerSel < len(sm.workerModels)-1 {
 				sm.workerSel++
 			}
 		case "k", "up":
@@ -152,17 +251,22 @@ func (sm setupModel) Update(msg tea.KeyMsg) (setupModel, tea.Cmd) {
 				sm.workerSel--
 			}
 		case "enter":
-			workerModel := ""
-			if len(models) > 0 {
-				workerModel = models[sm.workerSel].ID
-			}
-			preset := &engine.ProviderPresets[sm.providerSel]
+			archPreset := &engine.ProviderPresets[sm.archProviderSel]
+			workerPreset := &engine.ProviderPresets[sm.workerProviderSel]
 			architectModel := ""
 			if len(sm.architectModels) > 0 {
 				architectModel = sm.architectModels[sm.architectSel].ID
 			}
-			apiKey := sm.store.GetAPIKey(preset.ArchitectProvider)
-			if err := sm.store.SaveAuth(preset.ArchitectProvider, apiKey, architectModel, workerModel); err != nil {
+			workerModel := ""
+			if len(sm.workerModels) > 0 {
+				workerModel = sm.workerModels[sm.workerSel].ID
+			}
+			archAPIKey := sm.store.GetAPIKey(archPreset.ArchitectProvider)
+			workerAPIKey := sm.store.GetAPIKey(workerPreset.ArchitectProvider)
+			if err := sm.store.SaveAuth(
+				archPreset.ArchitectProvider, archAPIKey, architectModel,
+				workerPreset.ArchitectProvider, workerAPIKey, workerModel,
+			); err != nil {
 				mlog.Error("SaveAuth", slog.String("err", err.Error()))
 			}
 			return sm, func() tea.Msg { return loginDoneMsg{} }
@@ -184,6 +288,15 @@ func (sm setupModel) HandleModelsFetched(msg modelsFetchedMsg) setupModel {
 	return sm
 }
 
+func (sm setupModel) HandleWorkerModelsFetched(msg workerModelsFetchedMsg) setupModel {
+	sm.fetching = false
+	sm.workerModels = msg.models
+	sort.Slice(sm.workerModels, func(i, j int) bool { return sm.workerModels[i].ID < sm.workerModels[j].ID })
+	sm.workerSel = 0
+	sm.step = 5
+	return sm
+}
+
 func (sm setupModel) View(w, h int, bannerLines []string, theme themeRef) string {
 	bannerStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 	var banner []string
@@ -195,24 +308,40 @@ func (sm setupModel) View(w, h int, bannerLines []string, theme themeRef) string
 	valStyle := lipgloss.NewStyle().Foreground(ColorInfo)
 	sep := lipgloss.NewStyle().Foreground(ColorSubtle).Render(" │ ")
 
-	if sm.step == 1 {
-		preset := engine.ProviderPresets[sm.providerSel]
-		title := lipgloss.NewStyle().Foreground(ColorMuted).Render(
-			"enter your " + preset.Name + " API key")
+	// API key entry (steps 1 and 4)
+	if sm.step == 1 || sm.step == 4 {
+		var providerName string
+		var inputKey string
+		var envVarHint string
+		if sm.step == 1 {
+			preset := engine.ProviderPresets[sm.archProviderSel]
+			providerName = preset.Name
+			inputKey = sm.archKey
+			if envVars, ok := engine.ProviderEnvVars[preset.ArchitectProvider]; ok && len(envVars) > 0 {
+				envVarHint = envVars[0]
+			}
+		} else {
+			preset := engine.ProviderPresets[sm.workerProviderSel]
+			providerName = preset.Name
+			inputKey = sm.workerKey
+			if envVars, ok := engine.ProviderEnvVars[preset.ArchitectProvider]; ok && len(envVars) > 0 {
+				envVarHint = envVars[0]
+			}
+		}
 
-		display := strings.Repeat("•", len(sm.key))
-		if len(sm.key) > 0 && len(sm.key) <= 8 {
-			display = sm.key
-		} else if len(sm.key) > 8 {
-			display = sm.key[:4] + strings.Repeat("•", len(sm.key)-8) + sm.key[len(sm.key)-4:]
+		title := lipgloss.NewStyle().Foreground(ColorMuted).Render("enter your " + providerName + " API key")
+		display := strings.Repeat("•", len(inputKey))
+		if len(inputKey) > 0 && len(inputKey) <= 8 {
+			display = inputKey
+		} else if len(inputKey) > 8 {
+			display = inputKey[:4] + strings.Repeat("•", len(inputKey)-8) + inputKey[len(inputKey)-4:]
 		}
 		cursor := lipgloss.NewStyle().Foreground(ColorActive).Render("█")
 		inputLine := lipgloss.NewStyle().Foreground(ColorText).Render(display) + cursor
 
 		envHint := ""
-		if envVars, ok := engine.ProviderEnvVars[preset.ArchitectProvider]; ok {
-			envHint = lipgloss.NewStyle().Foreground(ColorDim).Italic(true).Render(
-				"or set " + envVars[0] + " env var")
+		if envVarHint != "" {
+			envHint = lipgloss.NewStyle().Foreground(ColorDim).Italic(true).Render("or set " + envVarHint + " env var")
 		}
 
 		help := strings.Join([]string{
@@ -231,7 +360,8 @@ func (sm setupModel) View(w, h int, bannerLines []string, theme themeRef) string
 		return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, strings.Join(lines, "\n"))
 	}
 
-	if sm.step == 2 || sm.step == 3 {
+	// Model selection (steps 2 and 5)
+	if sm.step == 2 || sm.step == 5 {
 		var subtitle string
 		var models []engine.ModelOption
 		var sel int
@@ -244,7 +374,6 @@ func (sm setupModel) View(w, h int, bannerLines []string, theme themeRef) string
 			models = sm.workerModels
 			sel = sm.workerSel
 		}
-
 
 		var modelLines []string
 		for i, mo := range models {
@@ -266,8 +395,6 @@ func (sm setupModel) View(w, h int, bannerLines []string, theme themeRef) string
 			modelLines = append(modelLines, arrow+id+desc)
 		}
 
-		modelBlock := strings.Join(modelLines, "\n")
-
 		help := strings.Join([]string{
 			keyStyle.Render("j/k") + valStyle.Render(" select"),
 			keyStyle.Render("enter") + valStyle.Render(" confirm"),
@@ -275,7 +402,7 @@ func (sm setupModel) View(w, h int, bannerLines []string, theme themeRef) string
 		}, sep)
 
 		header := lipgloss.JoinVertical(lipgloss.Center, append(banner, "", subtitle)...)
-		content := lipgloss.JoinVertical(lipgloss.Left, "", modelBlock, "")
+		content := lipgloss.JoinVertical(lipgloss.Left, "", strings.Join(modelLines, "\n"), "")
 		block := lipgloss.JoinVertical(lipgloss.Center, header, content, help)
 		return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, block)
 	}
@@ -288,12 +415,20 @@ func (sm setupModel) View(w, h int, bannerLines []string, theme themeRef) string
 		return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, strings.Join(lines, "\n"))
 	}
 
-	// Step 0: provider selection
-	subtitle := lipgloss.NewStyle().Foreground(ColorMuted).Render("select your provider")
+	// Provider selection (steps 0 and 3)
+	var subtitle string
+	var providerSel int
+	if sm.step == 0 {
+		subtitle = lipgloss.NewStyle().Foreground(ColorMuted).Render("select architect provider")
+		providerSel = sm.archProviderSel
+	} else {
+		subtitle = lipgloss.NewStyle().Foreground(ColorMuted).Render("select worker provider")
+		providerSel = sm.workerProviderSel
+	}
 
 	var providerLines []string
 	for i, p := range engine.ProviderPresets {
-		sel := i == sm.providerSel
+		sel := i == providerSel
 		arrow := "  "
 		if sel {
 			arrow = lipgloss.NewStyle().Foreground(ColorActive).Render("▸ ")

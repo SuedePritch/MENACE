@@ -173,7 +173,7 @@ func (c *chatPanel) HandleInsert(act action, ctx chatContext) tea.Cmd {
 				c.updateViewport(ctx.theme, ctx.frame)
 				return tea.Batch(cmds...)
 			}
-			proc, err := engine.StartArchProcess(ctx.menaceDir, ctx.cwd, ctx.programRef, auth.Provider, auth.ArchitectModel, auth.APIKey)
+			proc, err := engine.StartArchProcess(ctx.menaceDir, ctx.cwd, ctx.programRef, auth.ArchitectProvider, auth.ArchitectModel, auth.ArchitectAPIKey)
 			if err != nil {
 				c.busy = false
 				c.appendMessage("architect", "⚠ "+err.Error())
@@ -278,15 +278,22 @@ func (c *chatPanel) HandleToolMsg(display string, theme config.Theme, frame int)
 // HandleDone processes the architect's completed response. Returns proposals
 // for the parent to persist, rather than reaching into the parent model.
 func (c *chatPanel) HandleDone(msg engine.ArchDoneMsg, theme config.Theme, frame int) tea.Cmd {
+	// Capture any streamed text before resetStream clears it.
+	streamed := c.stream
 	c.resetStream()
+
 	if msg.Err != nil {
 		c.appendMessage("architect", "⚠ Error: "+msg.Err.Error())
 		c.updateViewport(theme, frame)
 		return msgCmd(chatMarkDirtyMsg{})
 	}
 
-	if msg.Response != "" {
-		c.appendMessage("architect", msg.Response)
+	response := msg.Response
+	if response == "" {
+		response = streamed
+	}
+	if response != "" {
+		c.appendMessage("architect", response)
 	}
 
 	var proposals []store.Proposal

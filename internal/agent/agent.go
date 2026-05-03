@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/flitsinc/go-llms/anthropic"
@@ -11,7 +12,17 @@ import (
 	"github.com/flitsinc/go-llms/llms"
 	"github.com/flitsinc/go-llms/openai"
 	"github.com/flitsinc/go-llms/tools"
+
+	mlog "menace/internal/log"
 )
+
+// RunTextOnly sends a message with tool use disabled, forcing a text-only response.
+// Used to break infinite tool-call loops (e.g. Gemini empty-turn issue).
+func (a *Agent) RunTextOnly(ctx context.Context, message string) (string, error) {
+	a.llm.SetToolChoice(tools.AllowOnly()) // empty allowlist = no tools
+	defer a.llm.SetToolChoice(tools.AnyTool())
+	return a.Run(ctx, message)
+}
 
 // Event is emitted during agent execution for UI streaming.
 type Event struct {
@@ -33,9 +44,13 @@ type Usage struct {
 
 // Agent wraps go-llms to provide a persistent conversational agent.
 type Agent struct {
-	llm      *llms.LLM
-	OnEvent  func(Event)
+	llm          *llms.LLM
+	providerName string
+	OnEvent      func(Event)
 }
+
+// Provider returns the provider name this agent was created with.
+func (a *Agent) Provider() string { return a.providerName }
 
 // Usage returns the cumulative token usage across all turns.
 func (a *Agent) Usage() Usage {
@@ -62,7 +77,7 @@ func NewAgent(providerName, model, apiKey, systemPrompt string, agentTools []too
 		l.WithMaxTurns(maxTurns)
 	}
 
-	return &Agent{llm: l}, nil
+	return &Agent{llm: l, providerName: providerName}, nil
 }
 
 // maxResponseSize caps accumulated text to prevent OOM from runaway models.
@@ -84,6 +99,7 @@ func (a *Agent) Run(ctx context.Context, message string) (string, error) {
 				a.OnEvent(Event{Type: "text_delta", Delta: u.Text})
 			}
 		case llms.ToolStartUpdate:
+			mlog.Debug("agent tool_start", slog.String("tool", u.Tool.FuncName()), slog.String("id", u.ToolCallID))
 			if a.OnEvent != nil {
 				a.OnEvent(Event{
 					Type:       "tool_start",
@@ -92,6 +108,12 @@ func (a *Agent) Run(ctx context.Context, message string) (string, error) {
 				})
 			}
 		case llms.ToolDoneUpdate:
+			resultBytes, _ := u.Result.Content().MarshalJSON()
+			resultPreview := string(resultBytes)
+			if len(resultPreview) > 200 {
+				resultPreview = resultPreview[:200] + "…"
+			}
+			mlog.Debug("agent tool_done", slog.String("tool", u.Tool.FuncName()), slog.String("id", u.ToolCallID), slog.Int("result_bytes", len(resultBytes)), slog.String("result_preview", resultPreview))
 			if a.OnEvent != nil {
 				a.OnEvent(Event{
 					Type:       "tool_done",
@@ -99,8 +121,11 @@ func (a *Agent) Run(ctx context.Context, message string) (string, error) {
 					ToolName:   u.Tool.FuncName(),
 				})
 			}
+		default:
+			mlog.Debug("agent unknown update", slog.String("type", fmt.Sprintf("%T", update)))
 		}
 	}
+	mlog.Debug("agent chat loop finished", slog.Int("text_len", buf.Len()))
 
 	fullText := buf.String()
 

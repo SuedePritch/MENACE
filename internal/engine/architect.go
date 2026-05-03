@@ -204,18 +204,32 @@ func (ap *ArchProcess) runPrompt(msg string) {
 	gen := ap.gen
 	ap.mu.Unlock()
 
+	toolCalls := 0
 	ap.ag.OnEvent = func(ev agent.Event) {
 		switch ev.Type {
 		case "text_delta":
 			ap.prog.Send(ArchChunkMsg{Delta: ev.Delta})
 		case "tool_start":
+			toolCalls++
+			mlog.Debug("architect tool_start", slog.String("tool", ev.ToolName), slog.String("id", ev.ToolCallID))
 			ap.prog.Send(ArchToolMsg{Display: ev.ToolName})
 		case "tool_done":
+			mlog.Debug("architect tool_done", slog.String("tool", ev.ToolName), slog.String("id", ev.ToolCallID))
 			ap.prog.Send(ArchToolMsg{Display: ev.ToolName})
 		}
 	}
 
+	mlog.Info("architect run start", slog.String("provider", ap.ag.Provider()), slog.Int("msg_len", len(msg)))
 	fullText, err := ap.ag.Run(ctx, msg)
+	mlog.Info("architect run done", slog.Int("text_len", len(fullText)), slog.Int("tool_calls", toolCalls), slog.Bool("err", err != nil))
+
+	// Some providers (Gemini) return an empty turn after tool calls instead of
+	// synthesizing a text response. Force a text-only turn to break the loop.
+	if err == nil && fullText == "" && toolCalls > 0 {
+		mlog.Info("architect empty response after tool calls — forcing text-only turn")
+		fullText, err = ap.ag.RunTextOnly(ctx, "Please provide your analysis and response now. Do not call any more tools.")
+		mlog.Info("architect text-only nudge done", slog.Int("text_len", len(fullText)), slog.Bool("err", err != nil))
+	}
 
 	if err != nil {
 		ap.mu.Lock()
@@ -223,8 +237,10 @@ func (ap *ArchProcess) runPrompt(msg string) {
 		ap.mu.Unlock()
 		if wasAlive {
 			if ctx.Err() != nil {
+				mlog.Info("architect run aborted by context", slog.String("ctx_err", ctx.Err().Error()))
 				return // aborted
 			}
+			mlog.Error("architect run error", slog.String("err", err.Error()))
 			ap.prog.Send(ArchCrashedMsg{Err: err})
 		}
 		return
@@ -235,13 +251,15 @@ func (ap *ArchProcess) runPrompt(msg string) {
 	stale := ap.gen != gen
 	ap.mu.Unlock()
 	if stale {
+		mlog.Info("architect discarding stale result", slog.Int64("gen", gen))
 		return
 	}
 
-	mlog.Debug("architect fullText", slog.Int("len", len(fullText)))
+	mlog.Info("architect fullText", slog.Int("len", len(fullText)), slog.Int("tool_calls", toolCalls))
 	proposals := ParseProposalBlocks(fullText)
 	mlog.Info("architect parsed proposals", slog.Int("count", len(proposals)))
 	clean := CleanResponse(fullText)
+	mlog.Info("architect sending ArchDoneMsg", slog.Int("response_len", len(clean)), slog.Int("proposals", len(proposals)))
 	ap.prog.Send(ArchDoneMsg{Response: clean, Proposals: proposals})
 }
 

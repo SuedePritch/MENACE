@@ -36,6 +36,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelsFetchedMsg:
 		m.setup = m.setup.HandleModelsFetched(msg)
 		return m, nil
+	case workerModelsFetchedMsg:
+		m.setup = m.setup.HandleWorkerModelsFetched(msg)
+		return m, nil
 	case customizeEditDoneMsg:
 		// Reload custom theme after editor closes
 		m.ts.theme = config.LoadTheme("custom", m.ts.dir)
@@ -223,9 +226,9 @@ func (m model) handleLoginDone(msg loginDoneMsg) (tea.Model, tea.Cmd) {
 		CWD:           m.project.cwd,
 		MenaceDir:     m.ts.dir,
 		ProjectID:     m.project.id,
-		ProviderName:  auth.Provider,
+		WorkerProvider: auth.WorkerProvider,
 		WorkerModel:   auth.WorkerModel,
-		APIKey:        auth.APIKey,
+		WorkerAPIKey:   auth.WorkerAPIKey,
 		MaxConcurrent: m.ts.cfg.Concurrency,
 		MaxRetry:      m.ts.cfg.MaxRetry,
 	}, m.store, m.programRef.p)
@@ -249,9 +252,9 @@ func (m model) handleStartDashboard() (tea.Model, tea.Cmd) {
 		CWD:           m.project.cwd,
 		MenaceDir:     m.ts.dir,
 		ProjectID:     m.project.id,
-		ProviderName:  auth.Provider,
+		WorkerProvider: auth.WorkerProvider,
 		WorkerModel:   auth.WorkerModel,
-		APIKey:        auth.APIKey,
+		WorkerAPIKey:   auth.WorkerAPIKey,
 		MaxConcurrent: m.ts.cfg.Concurrency,
 		MaxRetry:      m.ts.cfg.MaxRetry,
 	}, m.store, m.programRef.p)
@@ -351,9 +354,9 @@ func (m model) switchToProject(p store.ProjectEntry) (tea.Model, tea.Cmd) {
 			CWD:           m.project.cwd,
 			MenaceDir:     m.ts.dir,
 			ProjectID:     m.project.id,
-			ProviderName:  auth.Provider,
+			WorkerProvider: auth.WorkerProvider,
 			WorkerModel:   auth.WorkerModel,
-			APIKey:        auth.APIKey,
+			WorkerAPIKey:   auth.WorkerAPIKey,
 			MaxConcurrent: m.ts.cfg.Concurrency,
 			MaxRetry:      m.ts.cfg.MaxRetry,
 		}, m.store, m.programRef.p)

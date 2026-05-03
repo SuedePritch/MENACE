@@ -362,7 +362,7 @@ func TestAuthRoundTrip(t *testing.T) {
 	}
 
 	// Save and retrieve — skip if keyring is unavailable (CI, headless Linux)
-	if err := s.SaveAuth("anthropic", "sk-test-key-123", "claude-opus", "claude-haiku"); err != nil {
+	if err := s.SaveAuth("anthropic", "sk-test-key-123", "claude-opus", "google", "goog-key", "gemini-flash"); err != nil {
 		t.Skipf("keyring unavailable: %v", err)
 	}
 
@@ -373,23 +373,26 @@ func TestAuthRoundTrip(t *testing.T) {
 	if auth == nil {
 		t.Fatal("expected non-nil auth")
 	}
-	if auth.Provider != "anthropic" {
-		t.Fatalf("wrong provider: %s", auth.Provider)
+	if auth.ArchitectProvider != "anthropic" {
+		t.Fatalf("wrong architect provider: %s", auth.ArchitectProvider)
 	}
-	if auth.APIKey != "sk-test-key-123" {
-		t.Fatalf("API key round-trip failed: got %q", auth.APIKey)
+	if auth.ArchitectAPIKey != "sk-test-key-123" {
+		t.Fatalf("architect API key round-trip failed: got %q", auth.ArchitectAPIKey)
 	}
 	if auth.ArchitectModel != "claude-opus" {
 		t.Fatalf("wrong architect model: %s", auth.ArchitectModel)
 	}
-	if auth.WorkerModel != "claude-haiku" {
+	if auth.WorkerProvider != "google" {
+		t.Fatalf("wrong worker provider: %s", auth.WorkerProvider)
+	}
+	if auth.WorkerModel != "gemini-flash" {
 		t.Fatalf("wrong worker model: %s", auth.WorkerModel)
 	}
 }
 
 func TestAuthClearAll(t *testing.T) {
 	s := testStore(t)
-	if err := s.SaveAuth("anthropic", "sk-key", "opus", "haiku"); err != nil {
+	if err := s.SaveAuth("anthropic", "sk-key", "opus", "anthropic", "sk-key", "haiku"); err != nil {
 		t.Skipf("keyring unavailable: %v", err)
 	}
 

@@ -36,13 +36,13 @@ type TaskCompletedMsg struct {
 }
 
 type Orchestrator struct {
-	cwd          string
-	menaceDir    string
-	projectID    string
-	providerName string
-	workerModel  string
-	apiKey       string
-	store        TaskStore
+	cwd            string
+	menaceDir      string
+	projectID      string
+	workerProvider string
+	workerModel    string
+	workerAPIKey   string
+	store          TaskStore
 	maxConc      int
 	maxRetry     int
 
@@ -63,14 +63,14 @@ type workerProc struct {
 }
 
 type OrchestratorConfig struct {
-	CWD           string
-	MenaceDir     string
-	ProjectID     string
-	ProviderName  string
-	WorkerModel   string
-	APIKey        string
-	MaxConcurrent int
-	MaxRetry      int
+	CWD            string
+	MenaceDir      string
+	ProjectID      string
+	WorkerProvider string
+	WorkerModel    string
+	WorkerAPIKey   string
+	MaxConcurrent  int
+	MaxRetry       int
 }
 
 func NewOrchestrator(cfg OrchestratorConfig, s TaskStore, p *tea.Program) *Orchestrator {
@@ -79,9 +79,9 @@ func NewOrchestrator(cfg OrchestratorConfig, s TaskStore, p *tea.Program) *Orche
 		cwd:          cfg.CWD,
 		menaceDir:    cfg.MenaceDir,
 		projectID:    cfg.ProjectID,
-		providerName: cfg.ProviderName,
-		workerModel:  cfg.WorkerModel,
-		apiKey:       cfg.APIKey,
+		workerProvider: cfg.WorkerProvider,
+		workerModel:    cfg.WorkerModel,
+		workerAPIKey:   cfg.WorkerAPIKey,
 		store:        s,
 		maxConc:      cfg.MaxConcurrent,
 		maxRetry:     cfg.MaxRetry,
@@ -337,6 +337,11 @@ func (o *Orchestrator) executeAndReview(ctx context.Context, t store.TaskData, s
 		}
 	}
 
+	// Treat no-diff as failure — agent ran but made no changes.
+	if agentOk && (preRef == "" || postRef == "" || preRef == postRef) {
+		agentOk = false
+	}
+
 	if !agentOk {
 		o.taskLog(t.ID, "Agent failed (no changes or error)")
 		if sub != nil {
@@ -391,14 +396,14 @@ func (o *Orchestrator) runAgent(ctx context.Context, taskID, agentType, prompt s
 
 	systemPrompt := LoadSystemPrompt(o.menaceDir, agentType)
 
-	if o.apiKey == "" {
-		o.taskLog(taskID, "No API key for provider %q", o.providerName)
+	if o.workerAPIKey == "" {
+		o.taskLog(taskID, "No API key for worker provider %q", o.workerProvider)
 		return false
 	}
 
 	workerTools := agent.WriteTools(o.menaceDir, o.cwd)
 
-	ag, err := agent.NewAgent(o.providerName, o.workerModel, o.apiKey, systemPrompt, workerTools, MaxWorkerIterations)
+	ag, err := agent.NewAgent(o.workerProvider, o.workerModel, o.workerAPIKey, systemPrompt, workerTools, MaxWorkerIterations)
 	if err != nil {
 		o.taskLog(taskID, "Failed to create agent: %v", err)
 		return false
@@ -420,7 +425,7 @@ func (o *Orchestrator) runAgent(ctx context.Context, taskID, agentType, prompt s
 		}
 	}
 
-	mlog.Info("worker agent started", slog.String("task", taskID), slog.String("provider", o.providerName), slog.String("model", o.workerModel), slog.Int("tools", len(workerTools)))
+	mlog.Info("worker agent started", slog.String("task", taskID), slog.String("provider", o.workerProvider), slog.String("model", o.workerModel), slog.Int("tools", len(workerTools)))
 
 	fullText, err := ag.Run(ctx, prompt)
 	_ = fullText

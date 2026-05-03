@@ -146,6 +146,14 @@ func (s *Store) initSchema() error {
 		}
 	}
 
+	// Idempotent column migrations — errors from duplicate columns are ignored.
+	migrations := []string{
+		`ALTER TABLE auth ADD COLUMN worker_provider TEXT DEFAULT ''`,
+	}
+	for _, stmt := range migrations {
+		s.db.Exec(stmt) // nolint: errcheck — duplicate column errors are expected and harmless
+	}
+
 	return nil
 }
 

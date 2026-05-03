@@ -177,7 +177,7 @@ func initialModel(cwd, menaceDir string, s *store.Store) model {
 	}
 
 	startScreen := screenSetup
-	if auth, _ := s.GetAuth(); auth != nil && auth.APIKey != "" {
+	if auth, _ := s.GetAuth(); auth != nil && auth.ArchitectAPIKey != "" {
 		startScreen = screenDashboard
 	}
 

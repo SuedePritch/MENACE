@@ -5,24 +5,41 @@ import (
 	"fmt"
 )
 
-// ─── Auth methods ─────────────────────────────────────────────────────
+// AuthConfig holds provider, model, and API key for both architect and worker.
+type AuthConfig struct {
+	ArchitectProvider string
+	ArchitectModel    string
+	ArchitectAPIKey   string
+	WorkerProvider    string
+	WorkerModel       string
+	WorkerAPIKey      string
+}
 
-func (s *Store) SaveAuth(provider, apiKey, architectModel, workerModel string) error {
-	if err := keyringSet(provider, apiKey); err != nil {
+// SaveAuth persists provider/model selections and stores API keys in the keychain.
+// Architect and worker may use different providers.
+func (s *Store) SaveAuth(architectProvider, architectAPIKey, architectModel, workerProvider, workerAPIKey, workerModel string) error {
+	if err := keyringSet(architectProvider, architectAPIKey); err != nil {
 		return err
 	}
+	if workerProvider != architectProvider && workerProvider != "" {
+		if err := keyringSet(workerProvider, workerAPIKey); err != nil {
+			return err
+		}
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO auth (provider, architect_model, worker_model, updated_at)
-		 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		`INSERT INTO auth (provider, architect_model, worker_model, worker_provider, updated_at)
+		 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
 		 ON CONFLICT(provider) DO UPDATE SET
-		   architect_model = excluded.architect_model,
-		   worker_model = excluded.worker_model,
-		   updated_at = CURRENT_TIMESTAMP`,
-		provider, architectModel, workerModel,
+		   architect_model  = excluded.architect_model,
+		   worker_model     = excluded.worker_model,
+		   worker_provider  = excluded.worker_provider,
+		   updated_at       = CURRENT_TIMESTAMP`,
+		architectProvider, architectModel, workerModel, workerProvider,
 	)
 	return err
 }
 
+// SaveAPIKey stores an API key for a provider without changing model selections.
 func (s *Store) SaveAPIKey(provider, apiKey string) error {
 	if err := keyringSet(provider, apiKey); err != nil {
 		return err
@@ -35,30 +52,39 @@ func (s *Store) SaveAPIKey(provider, apiKey string) error {
 	return err
 }
 
-type AuthConfig struct {
-	Provider       string
-	APIKey         string
-	ArchitectModel string
-	WorkerModel    string
-}
-
-// GetAuth returns the active auth config (first row).
+// GetAuth returns the active auth config.
 // Returns (nil, nil) when no auth is configured.
-// Returns a non-nil error only on database or decryption failures.
 func (s *Store) GetAuth() (*AuthConfig, error) {
 	var a AuthConfig
-	err := s.db.QueryRow(`SELECT provider, architect_model, worker_model FROM auth LIMIT 1`).
-		Scan(&a.Provider, &a.ArchitectModel, &a.WorkerModel)
+	var workerProvider sql.NullString
+	err := s.db.QueryRow(
+		`SELECT provider, architect_model, worker_model, worker_provider FROM auth LIMIT 1`,
+	).Scan(&a.ArchitectProvider, &a.ArchitectModel, &a.WorkerModel, &workerProvider)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query auth: %w", err)
 	}
-	a.APIKey, err = keyringGet(a.Provider)
+
+	a.ArchitectAPIKey, err = keyringGet(a.ArchitectProvider)
 	if err != nil {
-		return nil, fmt.Errorf("retrieve api key for %s: %w", a.Provider, err)
+		return nil, fmt.Errorf("retrieve api key for %s: %w", a.ArchitectProvider, err)
 	}
+
+	// Worker provider falls back to architect provider if not set separately.
+	if workerProvider.Valid && workerProvider.String != "" {
+		a.WorkerProvider = workerProvider.String
+	} else {
+		a.WorkerProvider = a.ArchitectProvider
+	}
+
+	if a.WorkerProvider == a.ArchitectProvider {
+		a.WorkerAPIKey = a.ArchitectAPIKey
+	} else {
+		a.WorkerAPIKey, _ = keyringGet(a.WorkerProvider)
+	}
+
 	return &a, nil
 }
 
@@ -75,17 +101,26 @@ func (s *Store) HasAPIKey(provider string) bool {
 }
 
 func (s *Store) ClearAllAuth() error {
-	rows, err := s.db.Query(`SELECT provider FROM auth`)
+	rows, err := s.db.Query(`SELECT provider, worker_provider FROM auth`)
 	if err != nil {
 		return fmt.Errorf("query auth providers: %w", err)
 	}
 	defer rows.Close()
+	seen := map[string]bool{}
 	for rows.Next() {
 		var p string
-		if err := rows.Scan(&p); err != nil {
+		var wp sql.NullString
+		if err := rows.Scan(&p, &wp); err != nil {
 			return fmt.Errorf("scan auth provider: %w", err)
 		}
-		keyringDelete(p)
+		if !seen[p] {
+			keyringDelete(p)
+			seen[p] = true
+		}
+		if wp.Valid && wp.String != "" && !seen[wp.String] {
+			keyringDelete(wp.String)
+			seen[wp.String] = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate auth providers: %w", err)

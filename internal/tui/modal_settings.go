@@ -220,14 +220,14 @@ func (sm *SettingsModal) handlePickList(act action) tea.Cmd {
 		case "architect_model":
 			auth, _ := sm.store.GetAuth()
 			if auth != nil {
-				_ = sm.store.SaveAuth(auth.Provider, auth.APIKey, picked, auth.WorkerModel)
+				_ = sm.store.SaveAuth(auth.ArchitectProvider, auth.ArchitectAPIKey, picked, auth.WorkerProvider, auth.WorkerAPIKey, auth.WorkerModel)
 			}
 			sm.mode = settingsNav
 			return func() tea.Msg { return settingsModelChangedMsg{} }
 		case "worker_model":
 			auth, _ := sm.store.GetAuth()
 			if auth != nil {
-				_ = sm.store.SaveAuth(auth.Provider, auth.APIKey, auth.ArchitectModel, picked)
+				_ = sm.store.SaveAuth(auth.ArchitectProvider, auth.ArchitectAPIKey, auth.ArchitectModel, auth.WorkerProvider, auth.WorkerAPIKey, picked)
 			}
 			sm.mode = settingsNav
 			return func() tea.Msg { return settingsModelChangedMsg{} }
@@ -321,11 +321,12 @@ func (sm *SettingsModal) modelIDs(tier string) []string {
 	if auth == nil {
 		return nil
 	}
-	architect, worker := engine.FetchModels(auth.Provider, auth.APIKey)
 	var models []engine.ModelOption
 	if tier == "architect" {
+		architect, _ := engine.FetchModels(auth.ArchitectProvider, auth.ArchitectAPIKey)
 		models = architect
 	} else {
+		_, worker := engine.FetchModels(auth.WorkerProvider, auth.WorkerAPIKey)
 		models = worker
 	}
 	ids := make([]string, len(models))
@@ -339,8 +340,13 @@ func (sm *SettingsModal) settingsValue(key string) string {
 	auth, _ := sm.store.GetAuth()
 	switch key {
 	case "provider":
-		if auth != nil && auth.Provider != "" {
-			return auth.Provider
+		if auth != nil && auth.ArchitectProvider != "" {
+			return auth.ArchitectProvider
+		}
+		return "—"
+	case "worker_provider":
+		if auth != nil && auth.WorkerProvider != "" {
+			return auth.WorkerProvider
 		}
 		return "—"
 	case "architect_model":

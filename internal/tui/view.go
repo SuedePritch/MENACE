@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"menace/internal/store"
 
@@ -135,6 +136,13 @@ func (m model) renderBanner(w int) string {
 	if allDone {
 		parts = append(parts, lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render(
 			m.ts.theme.Personality.Done))
+	}
+	if m.rateLimited {
+		remaining := time.Until(m.rateLimitUntil)
+		if remaining > 0 {
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarn).Render(
+				fmt.Sprintf("⏸ rate limited · resuming in %ds", int(remaining.Seconds())+1)))
+		}
 	}
 
 	// Center banner art as a block (preserving internal spacing)

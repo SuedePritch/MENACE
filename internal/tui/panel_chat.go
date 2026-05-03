@@ -47,7 +47,8 @@ type chatContext struct {
 	sessionID  string
 	hasSession bool
 	results    []store.TaskResult // unseen task results
-	maxInputH  int
+	maxInputH   int
+	rateLimiter *engine.RateLimiter
 }
 
 // ── Chat panel ─────────────────────────────────────────────────────────────
@@ -173,7 +174,7 @@ func (c *chatPanel) HandleInsert(act action, ctx chatContext) tea.Cmd {
 				c.updateViewport(ctx.theme, ctx.frame)
 				return tea.Batch(cmds...)
 			}
-			proc, err := engine.StartArchProcess(ctx.menaceDir, ctx.cwd, ctx.programRef, auth.ArchitectProvider, auth.ArchitectModel, auth.ArchitectAPIKey)
+			proc, err := engine.StartArchProcess(ctx.menaceDir, ctx.cwd, ctx.programRef, auth.ArchitectProvider, auth.ArchitectModel, auth.ArchitectAPIKey, ctx.rateLimiter)
 			if err != nil {
 				c.busy = false
 				c.appendMessage("architect", "⚠ "+err.Error())

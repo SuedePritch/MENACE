@@ -52,18 +52,19 @@ func (ps *ParsedSubtask) UnmarshalYAML(value *yaml.Node) error {
 // ── Persistent architect process ────────────────────────────────────────────
 
 type ArchProcess struct {
-	ag       *agent.Agent
-	mu       sync.Mutex
-	alive    bool
-	prog     *tea.Program
-	cancel   context.CancelFunc
-	ctx      context.Context
-	gen      int64      // incremented on Abort; used to discard stale results
-	msgCh    chan string // serializes Prompt/Steer to avoid concurrent agent calls
-	stopOnce sync.Once  // ensures msgCh is closed exactly once
+	ag          *agent.Agent
+	mu          sync.Mutex
+	alive       bool
+	prog        *tea.Program
+	cancel      context.CancelFunc
+	ctx         context.Context
+	gen         int64      // incremented on Abort; used to discard stale results
+	msgCh       chan string // serializes Prompt/Steer to avoid concurrent agent calls
+	stopOnce    sync.Once  // ensures msgCh is closed exactly once
+	rateLimiter *RateLimiter
 }
 
-func StartArchProcess(menaceDir, cwd string, prog *tea.Program, providerName, modelName, apiKey string) (*ArchProcess, error) {
+func StartArchProcess(menaceDir, cwd string, prog *tea.Program, providerName, modelName, apiKey string, rl *RateLimiter) (*ArchProcess, error) {
 	systemPrompt := LoadSystemPrompt(menaceDir, "architect")
 
 	if apiKey == "" {
@@ -77,13 +78,17 @@ func StartArchProcess(menaceDir, cwd string, prog *tea.Program, providerName, mo
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	if rl == nil {
+		rl = &RateLimiter{}
+	}
 	ap := &ArchProcess{
-		ag:     ag,
-		alive:  true,
-		prog:   prog,
-		cancel: cancel,
-		ctx:    ctx,
-		msgCh:  make(chan string, 8),
+		ag:          ag,
+		alive:       true,
+		prog:        prog,
+		cancel:      cancel,
+		ctx:         ctx,
+		msgCh:       make(chan string, 8),
+		rateLimiter: rl,
 	}
 
 	// Single goroutine drains the message queue, ensuring only one runPrompt
@@ -220,7 +225,33 @@ func (ap *ArchProcess) runPrompt(msg string) {
 	}
 
 	mlog.Info("architect run start", slog.String("provider", ap.ag.Provider()), slog.Int("msg_len", len(msg)))
-	fullText, err := ap.ag.Run(ctx, msg)
+
+	// Wait out any active rate limit before making the request.
+	if waitErr := ap.rateLimiter.Wait(ctx); waitErr != nil {
+		return // context cancelled
+	}
+
+	var fullText string
+	var err error
+	const maxRateLimitRetries = 3
+	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
+		if ctx.Err() != nil {
+			return
+		}
+		fullText, err = ap.ag.Run(ctx, msg)
+		if isRL, retryAfter := IsRateLimitError(err); isRL {
+			ap.rateLimiter.RecordRateLimit(retryAfter)
+			mlog.Info("architect rate limited", slog.Duration("retryAfter", retryAfter), slog.Int("attempt", attempt))
+			ap.prog.Send(RateLimitMsg{Active: true, RetryAfter: retryAfter})
+			if waitErr := ap.rateLimiter.Wait(ctx); waitErr != nil {
+				return // context cancelled during wait
+			}
+			ap.prog.Send(RateLimitMsg{Active: false})
+			continue
+		}
+		break
+	}
+
 	mlog.Info("architect run done", slog.Int("text_len", len(fullText)), slog.Int("tool_calls", toolCalls), slog.Bool("err", err != nil))
 
 	// Some providers (Gemini) return an empty turn after tool calls instead of

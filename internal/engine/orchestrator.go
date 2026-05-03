@@ -27,6 +27,12 @@ const (
 // TasksChangedMsg tells the UI to re-read task state.
 type TasksChangedMsg struct{}
 
+// RateLimitMsg notifies the UI that rate limiting is active or has cleared.
+type RateLimitMsg struct {
+	Active     bool
+	RetryAfter time.Duration
+}
+
 // TaskCompletedMsg signals a task finished.
 type TaskCompletedMsg struct {
 	TaskID      string
@@ -46,12 +52,13 @@ type Orchestrator struct {
 	maxConc      int
 	maxRetry     int
 
-	mu      sync.Mutex
-	wg      sync.WaitGroup
-	running map[string]*workerProc
-	stopped bool
-	ctx     context.Context
-	cancel  context.CancelFunc
+	mu          sync.Mutex
+	wg          sync.WaitGroup
+	running     map[string]*workerProc
+	stopped     bool
+	ctx         context.Context
+	cancel      context.CancelFunc
+	rateLimiter *RateLimiter
 
 	program *tea.Program
 }
@@ -88,6 +95,7 @@ func NewOrchestrator(cfg OrchestratorConfig, s TaskStore, p *tea.Program) *Orche
 		running:      make(map[string]*workerProc),
 		ctx:          ctx,
 		cancel:       cancel,
+		rateLimiter:  &RateLimiter{},
 		program:      p,
 	}
 	o.scheduleInner()
@@ -427,7 +435,40 @@ func (o *Orchestrator) runAgent(ctx context.Context, taskID, agentType, prompt s
 
 	mlog.Info("worker agent started", slog.String("task", taskID), slog.String("provider", o.workerProvider), slog.String("model", o.workerModel), slog.Int("tools", len(workerTools)))
 
-	fullText, err := ag.Run(ctx, prompt)
+	// Wait out any active rate limit before starting.
+	if err := o.rateLimiter.Wait(ctx); err != nil {
+		o.taskLog(taskID, "Cancelled (rate limit wait)")
+		return false
+	}
+
+	const maxRateLimitRetries = 3
+	var fullText string
+	var runErr error
+	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
+		if ctx.Err() != nil {
+			break
+		}
+		fullText, runErr = ag.Run(ctx, prompt)
+		if isRL, retryAfter := IsRateLimitError(runErr); isRL {
+			o.rateLimiter.RecordRateLimit(retryAfter)
+			o.taskLog(taskID, "Rate limited — waiting %s before retry %d/%d", retryAfter, attempt+1, maxRateLimitRetries)
+			o.send(RateLimitMsg{Active: true, RetryAfter: retryAfter})
+			if waitErr := o.rateLimiter.Wait(ctx); waitErr != nil {
+				break
+			}
+			o.send(RateLimitMsg{Active: false})
+			// Reset the agent conversation state for a clean retry.
+			ag2, newErr := agent.NewAgent(o.workerProvider, o.workerModel, o.workerAPIKey, systemPrompt, workerTools, MaxWorkerIterations)
+			if newErr != nil {
+				o.taskLog(taskID, "Failed to recreate agent: %v", newErr)
+				return false
+			}
+			ag2.OnEvent = ag.OnEvent
+			ag = ag2
+			continue
+		}
+		break
+	}
 	_ = fullText
 
 	if ctx.Err() != nil {
@@ -435,9 +476,9 @@ func (o *Orchestrator) runAgent(ctx context.Context, taskID, agentType, prompt s
 		return false
 	}
 
-	if err != nil {
-		o.taskLog(taskID, "Agent error: %v", err)
-		mlog.Error("agent error", slog.String("type", agentType), slog.String("err", err.Error()))
+	if runErr != nil {
+		o.taskLog(taskID, "Agent error: %v", runErr)
+		mlog.Error("agent error", slog.String("type", agentType), slog.String("err", runErr.Error()))
 		return false
 	}
 
@@ -495,6 +536,11 @@ func (o *Orchestrator) CancelTask(taskID string) {
 			mlog.Error("CancelTask CancelTaskSubtasks", slog.String("task", taskID), slog.String("err", err.Error()))
 		}
 	}
+}
+
+// RateLimiter returns the shared rate limiter for use by other components (e.g. architect).
+func (o *Orchestrator) RateLimiter() *RateLimiter {
+	return o.rateLimiter
 }
 
 func (o *Orchestrator) ActiveCount() int {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"log/slog"
+	"time"
 
 	"menace/internal/config"
 	"menace/internal/engine"
@@ -145,6 +146,10 @@ type model struct {
 	// Animation
 	progress float64
 	frame    int
+
+	// Rate limiting
+	rateLimited    bool
+	rateLimitUntil time.Time
 
 	// Infrastructure
 	store          *store.Store

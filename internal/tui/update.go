@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"menace/internal/config"
 	"menace/internal/engine"
@@ -25,6 +26,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleTasksChanged()
 	case engine.TaskCompletedMsg:
 		return m.handleTaskCompleted(msg)
+	case engine.RateLimitMsg:
+		if msg.Active {
+			m.rateLimited = true
+			m.rateLimitUntil = time.Now().Add(msg.RetryAfter)
+		} else {
+			m.rateLimited = false
+		}
+		return m, nil
 	case spinner.TickMsg:
 		return m.handleTick(msg)
 	case loginDoneMsg:
@@ -500,6 +509,9 @@ func (m *model) chatCtx() chatContext {
 		store:      m.store,
 		hasSession: m.sess.current != nil,
 		maxInputH:  maxInputH,
+	}
+	if m.orchestrator != nil {
+		ctx.rateLimiter = m.orchestrator.RateLimiter()
 	}
 	if m.sess.current != nil {
 		ctx.sessionID = m.sess.current.ID

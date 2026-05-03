@@ -51,6 +51,10 @@ const (
 
 	actSettings
 	actRestart
+
+	actStageFile
+	actCommitStaged
+	actRevertFile
 )
 
 var normalKeys = map[string]action{
@@ -113,6 +117,9 @@ var modalKeys = map[string]action{
 	"D":     actDelete,
 	"r":     actRetry,
 	"enter": actConfirm,
+	"S":     actStageFile,
+	"C":     actCommitStaged,
+	"R":     actRevertFile,
 }
 
 func resolve(keymap map[string]action, key string) action {
@@ -145,6 +152,9 @@ var actionLabels = map[action]string{
 	actToggleLogs: "logs",
 	actPageUp: "pg up", actPageDown: "pg down",
 	actRestart: "restart",
+	actStageFile:    "stage",
+	actCommitStaged: "commit",
+	actRevertFile:   "revert",
 }
 
 var actionNames = map[string]action{
@@ -162,6 +172,9 @@ var actionNames = map[string]action{
 	"clear_input": actClearInput, "clear_chat": actClearChat,
 	"switch_pane": actSwitchPane,
 	"page_up": actPageUp, "page_down": actPageDown,
+	"stage_file":    actStageFile,
+	"commit_staged": actCommitStaged,
+	"revert_file":   actRevertFile,
 }
 
 func applyKeyOverrides(k config.KeysConfig) {

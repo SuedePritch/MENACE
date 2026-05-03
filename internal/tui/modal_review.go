@@ -13,6 +13,13 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+type reviewGitMode int
+
+const (
+	gitModeNormal reviewGitMode = iota
+	gitModeCommit
+)
+
 // ReviewModal encapsulates the task review modal state.
 type ReviewModal struct {
 	store        *store.Store
@@ -29,6 +36,10 @@ type ReviewModal struct {
 	raw      string
 	logView  viewport.Model
 	diffView viewport.Model
+
+	gitMode   reviewGitMode
+	commitBuf string
+	commitErr string
 }
 
 // NewReviewModal creates a review modal for the given task.
@@ -58,8 +69,40 @@ func NewReviewModal(s *store.Store, orch *engine.Orchestrator, cwd string, tasks
 	return rm
 }
 
-func (rm *ReviewModal) WantsRawKeys() bool        { return false }
-func (rm *ReviewModal) HandleRawKey(string) tea.Cmd { return nil }
+func (rm *ReviewModal) WantsRawKeys() bool { return rm.gitMode == gitModeCommit }
+
+func (rm *ReviewModal) HandleRawKey(key string) tea.Cmd {
+	if rm.gitMode != gitModeCommit {
+		return nil
+	}
+	switch key {
+	case "enter":
+		msg := strings.TrimSpace(rm.commitBuf)
+		rm.gitMode = gitModeNormal
+		rm.commitBuf = ""
+		if msg == "" {
+			return nil
+		}
+		if err := engine.GitCommit(rm.projectCwd, msg); err != nil {
+			rm.commitErr = err.Error()
+		} else {
+			rm.commitErr = ""
+			rm.loadDiffForScope()
+		}
+	case "esc", "escape":
+		rm.gitMode = gitModeNormal
+		rm.commitBuf = ""
+	case "backspace":
+		if len(rm.commitBuf) > 0 {
+			rm.commitBuf = rm.commitBuf[:len(rm.commitBuf)-1]
+		}
+	default:
+		if len(key) == 1 {
+			rm.commitBuf += key
+		}
+	}
+	return nil
+}
 
 // Resize updates viewport dimensions.
 func (rm *ReviewModal) Resize(w, h int) {
@@ -154,6 +197,31 @@ func (rm *ReviewModal) Update(act action) tea.Cmd {
 		}
 	}
 
+	// Git actions — only active in "all" scope and normal git mode.
+	if rm.scope == diffScopeAll && rm.gitMode == gitModeNormal {
+		switch act {
+		case actStageFile:
+			if len(rm.files) > 0 {
+				f := rm.files[rm.fileSel]
+				if f.staged {
+					engine.GitUnstageFile(rm.projectCwd, f.name) //nolint:errcheck
+				} else {
+					engine.GitStageFile(rm.projectCwd, f.name) //nolint:errcheck
+				}
+				rm.loadDiffForScope()
+			}
+		case actCommitStaged:
+			rm.gitMode = gitModeCommit
+			rm.commitBuf = ""
+			rm.commitErr = ""
+		case actRevertFile:
+			if len(rm.files) > 0 {
+				engine.GitRevertFile(rm.projectCwd, rm.files[rm.fileSel].name) //nolint:errcheck
+				rm.loadDiffForScope()
+			}
+		}
+	}
+
 	t := rm.findTask()
 	if t == nil {
 		return nil
@@ -238,6 +306,15 @@ func (rm *ReviewModal) loadDiffForScope() {
 
 	rm.raw = raw
 	rm.files = parseDiffFiles(raw)
+
+	// Annotate which files are staged (all scope only).
+	if rm.scope == diffScopeAll {
+		staged := engine.GitStagedFiles(rm.projectCwd)
+		for i := range rm.files {
+			rm.files[i].staged = staged[rm.files[i].name]
+		}
+	}
+
 	rm.fileSel = 0
 	rm.updateDiffViewForFile()
 }
@@ -311,28 +388,50 @@ func (rm *ReviewModal) View(w, h int) string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top, leftBox, diffBox)
 	header := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Padding(0, 1).Render("◈ " + title)
 
-	helpEntries := []helpEntry{
-		helpPair(modalKeys, actDown, actUp, "scroll"),
-		helpKey(modalKeys, actSwitchPane),
-		helpKey(modalKeys, actCycleScope),
-		helpKey(modalKeys, actToggleLogs),
-	}
-
-	if t := rm.findTask(); t != nil {
-		switch t.status {
-		case store.StatusRunning, store.StatusPending, store.StatusQueued:
-			helpEntries = append(helpEntries, helpKey(modalKeys, actCancel))
-		case store.StatusFailed, store.StatusCancelled:
-			helpEntries = append(helpEntries, helpKey(modalKeys, actRetry), helpKey(modalKeys, actDelete))
-		case store.StatusDone:
-			helpEntries = append(helpEntries, helpKey(modalKeys, actDelete))
+	var helpLine string
+	if rm.gitMode == gitModeCommit {
+		// Commit input line replaces the help bar.
+		prompt := "commit: " + rm.commitBuf + "█"
+		if rm.commitErr != "" {
+			prompt = lipgloss.NewStyle().Foreground(ColorFail).Render("error: "+rm.commitErr) + "  " + prompt
 		}
+		helpLine = " " + lipgloss.NewStyle().Foreground(ColorText).Render(prompt) +
+			"  " + renderHelp(
+			helpEntry{Key: "enter", Label: "confirm"},
+			helpEntry{Key: "esc", Label: "cancel"},
+		)
+	} else {
+		helpEntries := []helpEntry{
+			helpPair(modalKeys, actDown, actUp, "scroll"),
+			helpKey(modalKeys, actSwitchPane),
+			helpKey(modalKeys, actCycleScope),
+			helpKey(modalKeys, actToggleLogs),
+		}
+
+		if t := rm.findTask(); t != nil {
+			switch t.status {
+			case store.StatusRunning, store.StatusPending, store.StatusQueued:
+				helpEntries = append(helpEntries, helpKey(modalKeys, actCancel))
+			case store.StatusFailed, store.StatusCancelled:
+				helpEntries = append(helpEntries, helpKey(modalKeys, actRetry), helpKey(modalKeys, actDelete))
+			case store.StatusDone:
+				helpEntries = append(helpEntries, helpKey(modalKeys, actDelete))
+			}
+		}
+
+		if rm.scope == diffScopeAll {
+			helpEntries = append(helpEntries,
+				helpKey(modalKeys, actStageFile),
+				helpKey(modalKeys, actCommitStaged),
+				helpKey(modalKeys, actRevertFile),
+			)
+		}
+
+		helpEntries = append(helpEntries, helpKeyLabel(modalKeys, actEscape, "close"))
+		helpLine = " " + renderHelp(helpEntries...)
 	}
 
-	helpEntries = append(helpEntries, helpKeyLabel(modalKeys, actEscape, "close"))
-	help := " " + renderHelp(helpEntries...)
-
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, help)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, helpLine)
 }
 
 func (rm *ReviewModal) renderFileList(w, h int) string {
@@ -344,21 +443,38 @@ func (rm *ReviewModal) renderFileList(w, h int) string {
 	delStyle := lipgloss.NewStyle().Foreground(ColorFail)
 	selStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
 	normalStyle := lipgloss.NewStyle().Foreground(ColorText)
+	stagedDotStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+	unstagedDotStyle := lipgloss.NewStyle().Foreground(ColorSubtle)
+
+	showStagedIndicator := rm.scope == diffScopeAll
 
 	var lines []string
 	for i, f := range rm.files {
 		stats := addStyle.Render(fmt.Sprintf("+%d", f.added)) + " " +
 			delStyle.Render(fmt.Sprintf("-%d", f.removed))
 
+		nameW := w - 12
+		if showStagedIndicator {
+			nameW -= 2
+		}
 		name := f.name
-		if len(name) > w-12 {
-			name = "…" + name[len(name)-(w-13):]
+		if len(name) > nameW {
+			name = "…" + name[len(name)-(nameW-1):]
+		}
+
+		var prefix string
+		if showStagedIndicator {
+			if f.staged {
+				prefix = stagedDotStyle.Render("● ")
+			} else {
+				prefix = unstagedDotStyle.Render("○ ")
+			}
 		}
 
 		if i == rm.fileSel {
-			lines = append(lines, selStyle.Render("▸ "+name)+" "+stats)
+			lines = append(lines, prefix+selStyle.Render("▸ "+name)+" "+stats)
 		} else {
-			lines = append(lines, normalStyle.Render("  "+name)+" "+stats)
+			lines = append(lines, prefix+normalStyle.Render("  "+name)+" "+stats)
 		}
 	}
 	return strings.Join(lines, "\n")

@@ -50,6 +50,7 @@ type diffFile struct {
 	added   int
 	removed int
 	hunks   string
+	staged  bool // true if the file appears in git's staging area
 }
 
 // chatState is an alias kept for the model struct field name.

@@ -323,30 +323,26 @@ func (o *Orchestrator) executeAndReview(ctx context.Context, t store.TaskData, s
 	prompt := o.buildWorkerPrompt(t, sub, instruction)
 	mlog.Debug("worker prompt length", slog.String("task", id), slog.Int("len", len(prompt)))
 
-	preRef := GitSnapshot(o.cwd)
-	mlog.Debug("diff capture preRef", slog.String("task", t.ID), slog.String("ref", preRef))
+	preDiff := GitDiffHead(o.cwd)
+	mlog.Debug("diff capture pre", slog.String("task", t.ID), slog.Int("len", len(preDiff)))
 	agentOk := o.runAgent(ctx, t.ID, "worker", prompt)
 
-	postRef := GitSnapshot(o.cwd)
-	mlog.Debug("diff capture postRef", slog.String("task", t.ID), slog.String("ref", postRef), slog.Bool("same", preRef == postRef))
-	if preRef != "" && postRef != "" {
-		diff := GitDiffBetween(o.cwd, preRef, postRef)
-		mlog.Debug("diff capture diff", slog.String("task", t.ID), slog.Int("len", len(diff)))
-		if diff != "" {
-			subID := ""
-			if sub != nil {
-				subID = sub.ID
-			}
-			if err := o.store.SaveTaskDiff(t.ID, subID, diff); err != nil {
-				mlog.Error("diff capture save", slog.String("task", t.ID), slog.String("err", err.Error()))
-			} else {
-				mlog.Debug("diff capture saved", slog.String("task", t.ID), slog.String("subtask", subID))
-			}
+	postDiff := GitDiffHead(o.cwd)
+	mlog.Debug("diff capture post", slog.String("task", t.ID), slog.Int("len", len(postDiff)))
+	if postDiff != "" && postDiff != preDiff {
+		subID := ""
+		if sub != nil {
+			subID = sub.ID
+		}
+		if err := o.store.SaveTaskDiff(t.ID, subID, postDiff); err != nil {
+			mlog.Error("diff capture save", slog.String("task", t.ID), slog.String("err", err.Error()))
+		} else {
+			mlog.Debug("diff capture saved", slog.String("task", t.ID), slog.String("subtask", subID))
 		}
 	}
 
 	// Treat no-diff as failure — agent ran but made no changes.
-	if agentOk && (preRef == "" || postRef == "" || preRef == postRef) {
+	if agentOk && postDiff == preDiff {
 		agentOk = false
 	}
 
@@ -591,4 +587,63 @@ func GitDiffBetween(cwd, from, to string) string {
 		return string(out[:maxDiffSize]) + "\n…(diff truncated)"
 	}
 	return string(out)
+}
+
+// GitDiffHead returns "git diff HEAD" — all staged and unstaged changes vs last commit.
+func GitDiffHead(cwd string) string {
+	cmd := exec.Command("git", "diff", "HEAD")
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	if len(out) > maxDiffSize {
+		return string(out[:maxDiffSize]) + "\n…(diff truncated)"
+	}
+	return string(out)
+}
+
+// GitStageFile runs "git add <file>" in cwd.
+func GitStageFile(cwd, file string) error {
+	cmd := exec.Command("git", "add", file)
+	cmd.Dir = cwd
+	return cmd.Run()
+}
+
+// GitUnstageFile runs "git restore --staged <file>" in cwd.
+func GitUnstageFile(cwd, file string) error {
+	cmd := exec.Command("git", "restore", "--staged", file)
+	cmd.Dir = cwd
+	return cmd.Run()
+}
+
+// GitRevertFile discards working tree changes to a file ("git checkout -- <file>").
+func GitRevertFile(cwd, file string) error {
+	cmd := exec.Command("git", "checkout", "--", file)
+	cmd.Dir = cwd
+	return cmd.Run()
+}
+
+// GitCommit runs "git commit -m <msg>" in cwd.
+func GitCommit(cwd, msg string) error {
+	cmd := exec.Command("git", "commit", "-m", msg)
+	cmd.Dir = cwd
+	return cmd.Run()
+}
+
+// GitStagedFiles returns the set of file paths currently in the staging area.
+func GitStagedFiles(cwd string) map[string]bool {
+	cmd := exec.Command("git", "diff", "--cached", "--name-only")
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			result[line] = true
+		}
+	}
+	return result
 }

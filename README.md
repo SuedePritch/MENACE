@@ -215,7 +215,7 @@ panel_tasks = "queue"
 
 ## Navigation Tools
 
-The Architect uses a purpose-built set of navigation tools designed to explore codebases token-efficiently. Rather than dumping file contents, each tool returns the minimum needed to decide what to look at next.
+Both agents use a purpose-built set of navigation tools designed to explore codebases token-efficiently. Rather than dumping file contents, each tool returns the minimum needed to decide what to look at next.
 
 | Tool | What it returns |
 |------|----------------|
@@ -239,6 +239,45 @@ Benchmarked against the MENACE codebase vs standard Claude Code tools (Read + Gr
 | Blast radius before changing a function | 5,597 tok | 52 tok | **108x** |
 | Refactor impact assessment | 8,841 tok | 286 tok | **31x** |
 | Security audit — touch points | 7,525 tok | 88 tok | **86x** |
+
+---
+
+## Custom Tools
+
+Drop a `.lua` file in the `tools/` directory and MENACE picks it up on next startup — no rebuild required.
+
+Each tool declares a `scope` controlling which agent can call it:
+
+| Scope | Available to |
+|-------|-------------|
+| `"architect"` | Planning agent only |
+| `"worker"` | Execution agents only |
+| `"both"` | All agents |
+
+The only built-in available to Lua tools is `exec(cwd, command, arg1, arg2, ...)` — runs a process in the project directory and returns combined output. No shell, no pipes. Named commands with explicit arguments.
+
+```lua
+-- tools/run_tests.lua
+name        = "run_tests"
+description = "Run go tests for a package and return pass/fail output."
+scope       = "both"
+
+params = {
+  { name = "package", type = "string",  description = "Go package path, e.g. ./internal/auth or ./..." },
+  { name = "filter",  type = "string",  description = "Test name regex filter (optional)", required = false },
+}
+
+function run(cwd, p)
+  local args = { cwd, "go", "test", p.package, "-v" }
+  if p.filter and p.filter ~= "" then
+    args[#args+1] = "-run"
+    args[#args+1] = p.filter
+  end
+  return exec(table.unpack(args))
+end
+```
+
+See `tools/example_tool.lua.example` for a ready-to-copy starting point.
 
 ---
 
@@ -270,8 +309,10 @@ MENACE/
 │   │   └── util.go            # Text wrapping, ANSI stripping
 │   ├── agent/                 # LLM agent layer (go-llms)
 │   │   ├── agent.go           # Agent wrapper, provider factory, usage tracking
-│   │   ├── tools_read.go      # Read-only tools (architect): navigation, grep, symbols
-│   │   └── tools_write.go     # Write tools (worker): edit, replace, insert
+│   │   ├── tools_registry.go  # RegisterTool, buildTools — scope-aware tool loading
+│   │   ├── tools_lua.go       # Runtime Lua tool loader (gopher-lua)
+│   │   ├── tools_read.go      # Built-in navigation tools (scope: both)
+│   │   └── tools_write.go     # Built-in write tools (scope: worker)
 │   ├── engine/                # Orchestration layer
 │   │   ├── architect.go       # Persistent architect process, proposal parsing
 │   │   ├── orchestrator.go    # Conflict-aware task scheduler, git diff capture
@@ -298,6 +339,8 @@ MENACE/
 ├── prompts/
 │   ├── architect.md           # Architect system prompt (editable)
 │   └── worker.md              # Worker system prompt (editable)
+├── tools/                     # Custom Lua tools (picked up automatically)
+│   └── run_tests.lua.example  # Copy and rename to activate
 ├── themes/                    # Custom theme TOML files
 └── docs/ideas/                # Feature specs for contributors
 ```

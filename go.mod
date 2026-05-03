@@ -15,6 +15,7 @@ require (
 	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
+	github.com/yuin/gopher-lua v1.1.2 // indirect
 )
 
 require (

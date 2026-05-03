@@ -70,7 +70,7 @@ func StartArchProcess(menaceDir, cwd string, prog *tea.Program, providerName, mo
 		return nil, fmt.Errorf("no API key for provider %q", providerName)
 	}
 
-	ag, err := agent.NewAgent(providerName, modelName, apiKey, systemPrompt, agent.ReadTools(cwd), MaxArchitectIterations)
+	ag, err := agent.NewAgent(providerName, modelName, apiKey, systemPrompt, agent.ReadTools(menaceDir, cwd), MaxArchitectIterations)
 	if err != nil {
 		return nil, fmt.Errorf("create agent: %w", err)
 	}

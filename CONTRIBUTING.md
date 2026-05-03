@@ -49,7 +49,7 @@ Go 1.25+ and Git. That's the whole stack.
 
 ## Structure
 
-`tui/` is the terminal UI, `engine/` is orchestration, `agent/` is LLM interaction and navigation tools, `store/` is persistence, `config/` is configuration. Clean boundaries. [ARCHITECTURE.md](ARCHITECTURE.md) has the full map if you need it.
+`tui/` is the terminal UI, `engine/` is orchestration, `agent/` is LLM interaction and navigation tools, `store/` is persistence, `config/` is configuration. `tools/` is for custom Lua tools — drop a `.lua` file there and it's picked up on next startup. Clean boundaries. [ARCHITECTURE.md](ARCHITECTURE.md) has the full map if you need it.
 
 ## Ideas
 

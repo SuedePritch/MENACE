@@ -1,0 +1,32 @@
+-- example_tool.lua.example — copy to tools/my_tool.lua to activate.
+--
+-- scope controls which agent can call this tool:
+--   "architect" — planning agent only
+--   "worker"    — execution agents only
+--   "both"      — all agents
+--
+-- The only built-in is exec(cwd, command, arg1, arg2, ...) -> string
+-- It runs a process in the project directory and returns combined output.
+-- No shell, no pipes — named commands with explicit arguments only.
+
+-- name        = "run_tests"
+-- description = "Run go tests for a package and return pass/fail output."
+-- scope       = "both"
+
+-- params = {
+--   { name = "package",     type = "string",  description = "Go package path, e.g. ./internal/auth or ./..." },
+--   { name = "filter",      type = "string",  description = "Test name regex filter (optional)", required = false },
+--   { name = "short",       type = "boolean", description = "Run with -short flag (optional)",   required = false },
+-- }
+
+-- function run(cwd, p)
+--   local args = { cwd, "go", "test", p.package, "-v" }
+--   if p.filter and p.filter ~= "" then
+--     args[#args+1] = "-run"
+--     args[#args+1] = p.filter
+--   end
+--   if p.short then
+--     args[#args+1] = "-short"
+--   end
+--   return exec(table.unpack(args))
+-- end

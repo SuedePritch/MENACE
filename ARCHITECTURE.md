@@ -110,6 +110,7 @@ All tool file operations are resolved through `resolvePath()`, which ensures pat
 - **Keybindings**: Config-driven key overrides for normal, insert, and modal modes. Three keymaps (normal, insert, modal) with semantic action names.
 - **System prompts**: Editable markdown files in `prompts/` for architect and worker behavior.
 - **Config**: `config.json` for concurrency, retry limits, and other tuning parameters.
+- **Custom tools**: Lua files in `tools/` loaded at runtime — no rebuild. Each tool declares a `scope` (`"architect"`, `"worker"`, or `"both"`), typed `params`, and a `run(cwd, params)` function. The only built-in available is `exec(cwd, command, ...args)` which runs a named process in the project directory. See `tools/example_tool.lua.example`.
 
 ## Design Boundaries
 

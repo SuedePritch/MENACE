@@ -28,19 +28,22 @@ const (
 // Pre-compiled regex for brace-based get_function fallback.
 var funcStartRe = regexp.MustCompile(`^(func |.*function |.*class |def )`)
 
-// ReadTools returns the read-only tool set (for architect).
-func ReadTools(cwd string) []tools.Tool {
-	return []tools.Tool{
-		treeTool(cwd),
-		findSymbolTool(cwd),
-		readFileTool(cwd),
-		searchCodeTool(cwd),
-		getFunctionTool(cwd),
-		callersTool(cwd),
-		calleesTool(cwd),
-		symbolContextTool(cwd),
-		grepFilesTool(cwd),
-	}
+func init() {
+	RegisterTool(ScopeBoth, treeTool)
+	RegisterTool(ScopeBoth, findSymbolTool)
+	RegisterTool(ScopeBoth, readFileTool)
+	RegisterTool(ScopeBoth, searchCodeTool)
+	RegisterTool(ScopeBoth, getFunctionTool)
+	RegisterTool(ScopeBoth, callersTool)
+	RegisterTool(ScopeBoth, calleesTool)
+	RegisterTool(ScopeBoth, symbolContextTool)
+	RegisterTool(ScopeBoth, grepFilesTool)
+}
+
+// ReadTools returns tools available to the architect (scope: architect or both).
+// Lua tools in menaceDir/tools/ matching those scopes are loaded automatically.
+func ReadTools(menaceDir, cwd string) []tools.Tool {
+	return buildTools(menaceDir, cwd, ScopeArchitect)
 }
 
 

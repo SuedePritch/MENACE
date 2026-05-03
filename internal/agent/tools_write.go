@@ -20,18 +20,19 @@ var (
 	importRequireRe = regexp.MustCompile(`^(const|let|var)\s.*=\s*require\(`)
 )
 
-// WriteTools returns read + write tools (for worker).
-func WriteTools(cwd string) []tools.Tool {
-	t := ReadTools(cwd)
-	t = append(t,
-		writeFileTool(cwd),
-		editFileTool(cwd),
-		replaceFunctionTool(cwd),
-		insertAfterTool(cwd),
-		addImportTool(cwd),
-		diffPreviewTool(cwd),
-	)
-	return t
+func init() {
+	RegisterTool(ScopeWorker, writeFileTool)
+	RegisterTool(ScopeWorker, editFileTool)
+	RegisterTool(ScopeWorker, replaceFunctionTool)
+	RegisterTool(ScopeWorker, insertAfterTool)
+	RegisterTool(ScopeWorker, addImportTool)
+	RegisterTool(ScopeWorker, diffPreviewTool)
+}
+
+// WriteTools returns tools available to workers (scope: worker or both).
+// Lua tools in menaceDir/tools/ matching those scopes are loaded automatically.
+func WriteTools(menaceDir, cwd string) []tools.Tool {
+	return buildTools(menaceDir, cwd, ScopeWorker)
 }
 
 // ── write_file ─────────────────────────────────────────────────────────────

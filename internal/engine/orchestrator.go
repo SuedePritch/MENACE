@@ -396,7 +396,7 @@ func (o *Orchestrator) runAgent(ctx context.Context, taskID, agentType, prompt s
 		return false
 	}
 
-	workerTools := agent.WriteTools(o.cwd)
+	workerTools := agent.WriteTools(o.menaceDir, o.cwd)
 
 	ag, err := agent.NewAgent(o.providerName, o.workerModel, o.apiKey, systemPrompt, workerTools, MaxWorkerIterations)
 	if err != nil {

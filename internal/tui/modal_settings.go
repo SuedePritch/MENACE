@@ -46,6 +46,7 @@ func settingsItems() []settingsItem {
 		{"provider", "provider", "auth", siDisplay},
 		{"architect_model", "architect", "auth", siPickList},
 		{"worker_model", "worker", "auth", siPickList},
+		{"provider_link", "Provider Setup", "auth", siAction},
 		{"concurrency", "concurrency", "performance", siNumeric},
 		{"max_retry", "max retry", "performance", siNumeric},
 		{"theme", "theme", "theme", siPickList},
@@ -174,6 +175,8 @@ func (sm *SettingsModal) Update(act action) tea.Cmd {
 				return func() tea.Msg { return settingsLogoutMsg{} }
 			case "customize":
 				return sm.customize()
+			case "provider_link":
+				return func() tea.Msg { return settingsOpenSetupMsg{} }
 			}
 		}
 	}
@@ -418,7 +421,7 @@ func (sm *SettingsModal) View(w, h int) string {
 				lines = append(lines, indent+"  "+lipgloss.NewStyle().Foreground(ColorMuted).Render(item.label))
 			}
 
-		case "customize":
+		case "customize", "provider_link":
 			if isSel {
 				lines = append(lines, indent+cursor+selLabel.Render(item.label))
 			} else {

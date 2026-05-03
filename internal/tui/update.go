@@ -131,6 +131,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSettingsLogout()
 	case settingsCustomizeMsg:
 		return m.handleSettingsCustomize()
+	case settingsOpenSetupMsg:
+		m.activeModal = nil
+		m.screen = screenSetup
+		m.setup = newSetupModel(m.store)
+		return m, nil
 	case sessionSelectedMsg:
 		return m.handleSessionSelected(msg)
 	case proposalApprovedMsg:

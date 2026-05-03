@@ -60,6 +60,7 @@ type settingsThemeChangedMsg struct {
 type settingsModelChangedMsg struct{}
 type settingsLogoutMsg struct{}
 type settingsCustomizeMsg struct{}
+type settingsOpenSetupMsg struct{}
 
 // customizeEditDoneMsg is sent when the external editor closes after theme customization.
 type customizeEditDoneMsg struct{ err error }

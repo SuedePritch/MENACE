@@ -151,7 +151,7 @@ func (s *Store) initSchema() error {
 		`ALTER TABLE auth ADD COLUMN worker_provider TEXT DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
-		s.db.Exec(stmt) // nolint: errcheck — duplicate column errors are expected and harmless
+		s.db.Exec(stmt) //nolint:errcheck // duplicate column errors are expected and harmless
 	}
 
 	return nil

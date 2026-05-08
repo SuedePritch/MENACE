@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,15 @@ import (
 	"menace/internal/agent"
 	mlog "menace/internal/log"
 	"menace/internal/store"
+)
+
+// execResult is the outcome of a single executeAndReview call.
+type execResult int
+
+const (
+	execSuccess execResult = iota
+	execFailed
+	execStalled // agent made changes but they conflict with the current main tree
 )
 
 const (
@@ -98,6 +109,7 @@ func NewOrchestrator(cfg OrchestratorConfig, s TaskStore, p *tea.Program) *Orche
 		rateLimiter:  &RateLimiter{},
 		program:      p,
 	}
+	go o.cleanupOrphanWorktrees()
 	o.scheduleInner()
 	return o
 }
@@ -199,7 +211,27 @@ func (o *Orchestrator) runTask(ctx context.Context, t store.TaskData) {
 	o.send(TasksChangedMsg{})
 	o.taskLog(t.ID, "Starting: %s", t.Description)
 
-	var success bool
+	// Create a single worktree for the entire task (all subtasks share it).
+	wtPath := filepath.Join(o.menaceDir, "worktrees", t.ID)
+	if err := GitWorktreeAdd(o.cwd, wtPath); err != nil {
+		o.taskLog(t.ID, "Failed to create worktree: %v", err)
+		if err2 := o.store.UpdateTaskStatus(t.ID, store.StatusFailed); err2 != nil {
+			mlog.Error("runTask worktree fail UpdateTaskStatus", slog.String("task", t.ID), slog.String("err", err2.Error()))
+		}
+		o.mu.Lock()
+		delete(o.running, t.ID)
+		o.mu.Unlock()
+		o.send(TaskCompletedMsg{TaskID: t.ID, Description: t.Description, Status: store.StatusFailed, ErrLine: err.Error()})
+		o.Schedule()
+		return
+	}
+	defer func() {
+		if rmErr := GitWorktreeRemove(o.cwd, wtPath); rmErr != nil {
+			mlog.Error("runTask worktree remove", slog.String("path", wtPath), slog.String("err", rmErr.Error()))
+		}
+	}()
+
+	var outcome execResult
 	for attempt := 0; attempt <= o.maxRetry; attempt++ {
 		if ctx.Err() != nil {
 			break
@@ -215,34 +247,40 @@ func (o *Orchestrator) runTask(ctx context.Context, t store.TaskData) {
 		}
 
 		if len(t.Subtasks) > 0 {
-			success = true
+			outcome = execSuccess
 			fresh, err := o.store.GetTask(t.ID)
 			if err != nil {
 				if !errors.Is(err, store.ErrNotFound) {
 					mlog.Error("runTask GetTask", slog.String("task", t.ID), slog.String("err", err.Error()))
 				}
-				success = false
+				outcome = execFailed
 				break
 			}
 			for _, sub := range fresh.Subtasks {
 				if ctx.Err() != nil {
-					success = false
+					outcome = execFailed
 					break
 				}
 				if sub.Status == store.StatusDone {
 					o.taskLog(t.ID, "Skipping (done): %s", sub.Description)
 					continue
 				}
-				ok := o.executeAndReview(ctx, t, &sub)
-				if !ok {
-					success = false
+				res := o.executeAndReview(ctx, t, &sub, wtPath)
+				if res != execSuccess {
+					outcome = res
 					break
 				}
 			}
+			// All subtasks succeeded — apply the accumulated worktree diff to the main tree.
+			if outcome == execSuccess {
+				fullDiff := GitDiffHead(wtPath)
+				outcome = o.applyWorktreeDiff(t.ID, t.ID, wtPath, fullDiff)
+			}
 		} else {
-			success = o.executeAndReview(ctx, t, nil)
+			outcome = o.executeAndReview(ctx, t, nil, wtPath)
 		}
-		if success {
+		// Don't retry a stalled task — it needs user intervention.
+		if outcome == execSuccess || outcome == execStalled {
 			break
 		}
 	}
@@ -261,12 +299,18 @@ func (o *Orchestrator) runTask(ctx context.Context, t store.TaskData) {
 			mlog.Error("runTask final UpdateTaskStatus", slog.String("task", t.ID), slog.String("err", err.Error()))
 		}
 		o.taskLog(t.ID, "Cancelled.")
-	} else if success {
+	} else if outcome == execSuccess {
 		finalStatus = store.StatusDone
 		if err := o.store.UpdateTaskStatus(t.ID, store.StatusDone); err != nil {
 			mlog.Error("runTask final UpdateTaskStatus", slog.String("task", t.ID), slog.String("err", err.Error()))
 		}
 		o.taskLog(t.ID, "Done.")
+	} else if outcome == execStalled {
+		finalStatus = store.StatusStalled
+		if err := o.store.UpdateTaskStatus(t.ID, store.StatusStalled); err != nil {
+			mlog.Error("runTask final UpdateTaskStatus", slog.String("task", t.ID), slog.String("err", err.Error()))
+		}
+		o.taskLog(t.ID, "Stalled — conflicts with current tree. Review diff and retry.")
 	} else {
 		finalStatus = store.StatusFailed
 		if err := o.store.UpdateTaskStatus(t.ID, store.StatusFailed); err != nil {
@@ -293,7 +337,7 @@ func (o *Orchestrator) runTask(ctx context.Context, t store.TaskData) {
 	o.Schedule()
 }
 
-func (o *Orchestrator) executeAndReview(ctx context.Context, t store.TaskData, sub *store.SubtaskData) bool {
+func (o *Orchestrator) executeAndReview(ctx context.Context, t store.TaskData, sub *store.SubtaskData, wtPath string) execResult {
 	id := t.ID
 	desc := t.Description
 	if sub != nil {
@@ -323,23 +367,12 @@ func (o *Orchestrator) executeAndReview(ctx context.Context, t store.TaskData, s
 	prompt := o.buildWorkerPrompt(t, sub, instruction)
 	mlog.Debug("worker prompt length", slog.String("task", id), slog.Int("len", len(prompt)))
 
-	preDiff := GitDiffHead(o.cwd)
-	mlog.Debug("diff capture pre", slog.String("task", t.ID), slog.Int("len", len(preDiff)))
-	agentOk := o.runAgent(ctx, t.ID, "worker", prompt)
+	// Snapshot the worktree before the agent runs so we can diff only this subtask's changes.
+	preDiff := GitDiffHead(wtPath)
+	agentOk := o.runAgentInDir(ctx, t.ID, "worker", prompt, wtPath)
 
-	postDiff := GitDiffHead(o.cwd)
-	mlog.Debug("diff capture post", slog.String("task", t.ID), slog.Int("len", len(postDiff)))
-	if postDiff != "" && postDiff != preDiff {
-		subID := ""
-		if sub != nil {
-			subID = sub.ID
-		}
-		if err := o.store.SaveTaskDiff(t.ID, subID, postDiff); err != nil {
-			mlog.Error("diff capture save", slog.String("task", t.ID), slog.String("err", err.Error()))
-		} else {
-			mlog.Debug("diff capture saved", slog.String("task", t.ID), slog.String("subtask", subID))
-		}
-	}
+	postDiff := GitDiffHead(wtPath)
+	mlog.Debug("diff capture", slog.String("task", t.ID), slog.Int("pre", len(preDiff)), slog.Int("post", len(postDiff)))
 
 	// Treat no-diff as failure — agent ran but made no changes.
 	if agentOk && postDiff == preDiff {
@@ -358,21 +391,59 @@ func (o *Orchestrator) executeAndReview(ctx context.Context, t store.TaskData, s
 			}
 		}
 		o.send(TasksChangedMsg{})
-		return false
+		return execFailed
 	}
 
-	o.taskLog(t.ID, "Done: %s", desc)
+	// Store the per-subtask diff (what this subtask changed in the worktree).
+	subtaskDiff := postDiff
+	if preDiff != "" {
+		// postDiff includes earlier subtask changes; isolate just this subtask's contribution
+		// by taking git diff in the worktree scoped to changes since preDiff was captured.
+		// Since we can't easily subtract diffs, store the full worktree diff here — the
+		// subtask diff is still useful for review even if it accumulates.
+		subtaskDiff = postDiff
+	}
+	subID := ""
 	if sub != nil {
+		subID = sub.ID
+	}
+	if err := o.store.SaveTaskDiff(t.ID, subID, subtaskDiff); err != nil {
+		mlog.Error("diff capture save", slog.String("task", t.ID), slog.String("err", err.Error()))
+	}
+
+	// This is the last subtask (or a no-subtask task): check if changes apply to main tree.
+	// We only apply at the task level (after all subtasks succeed), not per-subtask.
+	// For subtasks, just mark done and continue — the apply happens at task completion.
+	if sub != nil {
+		o.taskLog(t.ID, "Done: %s", desc)
 		if err := o.store.UpdateSubtaskStatus(id, store.StatusDone); err != nil {
 			mlog.Error("UpdateSubtaskStatus done", slog.String("subtask", id), slog.String("err", err.Error()))
 		}
-	} else {
-		if err := o.store.UpdateTaskStatus(id, store.StatusDone); err != nil {
-			mlog.Error("UpdateTaskStatus done", slog.String("task", id), slog.String("err", err.Error()))
-		}
+		o.send(TasksChangedMsg{})
+		return execSuccess
 	}
-	o.send(TasksChangedMsg{})
-	return true
+
+	// No subtasks — apply the worktree diff to the main tree now.
+	return o.applyWorktreeDiff(t.ID, id, wtPath, postDiff)
+}
+
+// applyWorktreeDiff checks for conflicts and applies the worktree's changes to the main tree.
+func (o *Orchestrator) applyWorktreeDiff(taskID, statusID, wtPath, diff string) execResult {
+	if diff == "" {
+		return execSuccess
+	}
+	if err := GitApplyCheck(o.cwd, diff); err != nil {
+		o.taskLog(taskID, "Conflict applying changes to main tree: %v", err)
+		mlog.Info("worktree apply conflict", slog.String("task", taskID), slog.String("err", err.Error()))
+		return execStalled
+	}
+	if err := GitApplyPatch(o.cwd, diff); err != nil {
+		o.taskLog(taskID, "Failed to apply changes to main tree: %v", err)
+		mlog.Error("worktree apply patch", slog.String("task", taskID), slog.String("err", err.Error()))
+		return execFailed
+	}
+	o.taskLog(taskID, "Applied changes to main tree.")
+	return execSuccess
 }
 
 func (o *Orchestrator) buildWorkerPrompt(t store.TaskData, sub *store.SubtaskData, instruction string) string {
@@ -395,7 +466,7 @@ func (o *Orchestrator) buildWorkerPrompt(t store.TaskData, sub *store.SubtaskDat
 	return strings.Join(parts, "\n\n")
 }
 
-func (o *Orchestrator) runAgent(ctx context.Context, taskID, agentType, prompt string) bool {
+func (o *Orchestrator) runAgentInDir(ctx context.Context, taskID, agentType, prompt, cwd string) bool {
 	mlog.Debug("worker prompt", slog.String("task", taskID), slog.Int("prompt_len", len(prompt)))
 
 	systemPrompt := LoadSystemPrompt(o.menaceDir, agentType)
@@ -405,7 +476,7 @@ func (o *Orchestrator) runAgent(ctx context.Context, taskID, agentType, prompt s
 		return false
 	}
 
-	workerTools := agent.WriteTools(o.menaceDir, o.cwd)
+	workerTools := agent.WriteTools(o.menaceDir, cwd)
 
 	ag, err := agent.NewAgent(o.workerProvider, o.workerModel, o.workerAPIKey, systemPrompt, workerTools, MaxWorkerIterations)
 	if err != nil {
@@ -646,4 +717,66 @@ func GitStagedFiles(cwd string) map[string]bool {
 		}
 	}
 	return result
+}
+
+// GitWorktreeAdd creates a detached worktree at path based on HEAD.
+func GitWorktreeAdd(cwd, path string) error {
+	cmd := exec.Command("git", "worktree", "add", "--detach", path, "HEAD")
+	cmd.Dir = cwd
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git worktree add: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// GitWorktreeRemove removes a worktree forcefully.
+func GitWorktreeRemove(cwd, path string) error {
+	cmd := exec.Command("git", "worktree", "remove", "--force", path)
+	cmd.Dir = cwd
+	return cmd.Run()
+}
+
+// GitApplyCheck dry-runs a patch against cwd. Returns error if it would conflict.
+func GitApplyCheck(cwd, patch string) error {
+	cmd := exec.Command("git", "apply", "--check", "-")
+	cmd.Dir = cwd
+	cmd.Stdin = strings.NewReader(patch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// GitApplyPatch applies a patch to cwd.
+func GitApplyPatch(cwd, patch string) error {
+	cmd := exec.Command("git", "apply", "-")
+	cmd.Dir = cwd
+	cmd.Stdin = strings.NewReader(patch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// cleanupOrphanWorktrees removes any leftover worktrees from a previous crash.
+func (o *Orchestrator) cleanupOrphanWorktrees() {
+	wtDir := filepath.Join(o.menaceDir, "worktrees")
+	entries, err := os.ReadDir(wtDir)
+	if err != nil {
+		return // directory doesn't exist yet — fine
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		path := filepath.Join(wtDir, e.Name())
+		if err := GitWorktreeRemove(o.cwd, path); err != nil {
+			// Worktree may already be gone from git's perspective; remove the dir directly.
+			_ = os.RemoveAll(path)
+			mlog.Info("cleaned up orphan worktree", slog.String("path", path))
+		}
+	}
 }

@@ -233,11 +233,11 @@ func (rm *ReviewModal) Update(act action) tea.Cmd {
 			return func() tea.Msg { return reviewCancelTaskMsg{TaskID: t.id} }
 		}
 	case actDelete:
-		if t.status == store.StatusDone || t.status == store.StatusFailed || t.status == store.StatusCancelled {
+		if t.status == store.StatusDone || t.status == store.StatusFailed || t.status == store.StatusCancelled || t.status == store.StatusStalled {
 			return func() tea.Msg { return reviewDeleteTaskMsg{TaskID: t.id} }
 		}
 	case actRetry:
-		if t.status == store.StatusFailed || t.status == store.StatusCancelled {
+		if t.status == store.StatusFailed || t.status == store.StatusCancelled || t.status == store.StatusStalled {
 			return func() tea.Msg { return reviewRetryTaskMsg{TaskID: t.id} }
 		}
 	}
@@ -338,6 +338,9 @@ func (rm *ReviewModal) View(w, h int) string {
 	title := "review"
 	if t := rm.findTask(); t != nil {
 		title = truncate(t.description, w-20)
+		if t.status == store.StatusStalled {
+			title += lipgloss.NewStyle().Foreground(ColorWarn).Render("  ⚡ conflict — changes clash with main tree, retry to rebase")
+		}
 	}
 
 	bodyH := h - 3
@@ -413,6 +416,8 @@ func (rm *ReviewModal) View(w, h int) string {
 			case store.StatusRunning, store.StatusPending, store.StatusQueued:
 				helpEntries = append(helpEntries, helpKey(modalKeys, actCancel))
 			case store.StatusFailed, store.StatusCancelled:
+				helpEntries = append(helpEntries, helpKey(modalKeys, actRetry), helpKey(modalKeys, actDelete))
+			case store.StatusStalled:
 				helpEntries = append(helpEntries, helpKey(modalKeys, actRetry), helpKey(modalKeys, actDelete))
 			case store.StatusDone:
 				helpEntries = append(helpEntries, helpKey(modalKeys, actDelete))

@@ -247,6 +247,9 @@ func (m model) handleLoginDone(msg loginDoneMsg) (tea.Model, tea.Cmd) {
 		MaxRetry:      m.ts.cfg.MaxRetry,
 	}, m.store, m.programRef.p)
 	m.chat.appendMessage("architect", m.ts.theme.Personality.Welcome)
+	if m.project.gitAvailable && engine.GitDiffHead(m.project.cwd) != "" {
+		m.chat.appendMessage("architect", "⚠ Working tree has uncommitted changes. Tasks will branch from HEAD — your current edits won't be visible to workers.")
+	}
 	m.updateChatViewport()
 	return m, nil
 }
@@ -327,6 +330,11 @@ func (m model) switchToProject(p store.ProjectEntry) (tea.Model, tea.Cmd) {
 	m.project.cwd = p.Path
 	m.project.id = p.ID
 	m.project.gitAvailable = engine.GitAvailable(p.Path)
+
+	// Warn if the working tree is dirty — tasks branch from HEAD, not from current edits.
+	if m.project.gitAvailable && engine.GitDiffHead(p.Path) != "" {
+		m.chat.appendMessage("architect", "⚠ Working tree has uncommitted changes. Tasks will branch from HEAD — your current edits won't be visible to workers.")
+	}
 	_ = m.store.RegisterProject(p.ID, p.Path)
 
 	// Load per-project theme

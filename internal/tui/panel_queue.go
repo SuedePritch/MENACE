@@ -120,6 +120,8 @@ func (qp *queuePanel) Render(w, h int, active bool, frame int) string {
 			meta = lipgloss.NewStyle().Foreground(ColorSuccess).Render(" done")
 		case store.StatusCancelled:
 			meta = lipgloss.NewStyle().Foreground(ColorMuted).Render(" cancelled")
+		case store.StatusStalled:
+			meta = lipgloss.NewStyle().Foreground(ColorWarn).Bold(true).Render(" conflict")
 		}
 
 		lines = append(lines, arrow+icon+descStyle.Render(desc)+meta)

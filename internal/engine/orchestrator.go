@@ -238,6 +238,12 @@ func (o *Orchestrator) runTask(ctx context.Context, t store.TaskData) {
 		}
 		if attempt > 0 {
 			o.taskLog(t.ID, "Retry %d/%d: %s", attempt, o.maxRetry, t.Description)
+			// Reset the worktree to HEAD so the retry starts from a clean state.
+			if err := GitWorktreeReset(wtPath); err != nil {
+				o.taskLog(t.ID, "Failed to reset worktree for retry: %v", err)
+				outcome = execFailed
+				break
+			}
 			for _, sub := range t.Subtasks {
 				if err := o.store.UpdateSubtaskStatus(sub.ID, store.StatusPending); err != nil {
 					mlog.Error("retry UpdateSubtaskStatus", slog.String("subtask", sub.ID), slog.String("err", err.Error()))
@@ -271,10 +277,9 @@ func (o *Orchestrator) runTask(ctx context.Context, t store.TaskData) {
 					break
 				}
 			}
-			// All subtasks succeeded — apply the accumulated worktree diff to the main tree.
+			// All subtasks succeeded — commit worktree changes and cherry-pick into main.
 			if outcome == execSuccess {
-				fullDiff := GitDiffHead(wtPath)
-				outcome = o.applyWorktreeDiff(t.ID, t.ID, wtPath, fullDiff)
+				outcome = o.commitAndMerge(t, wtPath)
 			}
 		} else {
 			outcome = o.executeAndReview(ctx, t, nil, wtPath)
@@ -367,9 +372,15 @@ func (o *Orchestrator) executeAndReview(ctx context.Context, t store.TaskData, s
 	prompt := o.buildWorkerPrompt(t, sub, instruction)
 	mlog.Debug("worker prompt length", slog.String("task", id), slog.Int("len", len(prompt)))
 
-	// Snapshot the worktree before the agent runs so we can diff only this subtask's changes.
+	// Stage all changes (including new untracked files) so git diff HEAD captures everything.
+	_ = GitStageAll(wtPath)
+
+	// Snapshot the worktree before the agent runs so we can detect per-subtask changes.
 	preDiff := GitDiffHead(wtPath)
 	agentOk := o.runAgentInDir(ctx, t.ID, "worker", prompt, wtPath)
+
+	// Stage again after agent runs to capture any new files it created.
+	_ = GitStageAll(wtPath)
 
 	postDiff := GitDiffHead(wtPath)
 	mlog.Debug("diff capture", slog.String("task", t.ID), slog.Int("pre", len(preDiff)), slog.Int("post", len(postDiff)))
@@ -394,15 +405,10 @@ func (o *Orchestrator) executeAndReview(ctx context.Context, t store.TaskData, s
 		return execFailed
 	}
 
-	// Store the per-subtask diff (what this subtask changed in the worktree).
+	// Store the per-subtask diff. postDiff is the full accumulated worktree diff;
+	// for the first subtask (preDiff=="") this is exactly the subtask's changes.
+	// For later subtasks it accumulates, but is still useful for review.
 	subtaskDiff := postDiff
-	if preDiff != "" {
-		// postDiff includes earlier subtask changes; isolate just this subtask's contribution
-		// by taking git diff in the worktree scoped to changes since preDiff was captured.
-		// Since we can't easily subtract diffs, store the full worktree diff here — the
-		// subtask diff is still useful for review even if it accumulates.
-		subtaskDiff = postDiff
-	}
 	subID := ""
 	if sub != nil {
 		subID = sub.ID
@@ -423,26 +429,44 @@ func (o *Orchestrator) executeAndReview(ctx context.Context, t store.TaskData, s
 		return execSuccess
 	}
 
-	// No subtasks — apply the worktree diff to the main tree now.
-	return o.applyWorktreeDiff(t.ID, id, wtPath, postDiff)
+	// No subtasks — commit worktree changes and cherry-pick into main.
+	return o.commitAndMerge(t, wtPath)
 }
 
-// applyWorktreeDiff checks for conflicts and applies the worktree's changes to the main tree.
-func (o *Orchestrator) applyWorktreeDiff(taskID, statusID, wtPath, diff string) execResult {
-	if diff == "" {
-		return execSuccess
-	}
-	if err := GitApplyCheck(o.cwd, diff); err != nil {
-		o.taskLog(taskID, "Conflict applying changes to main tree: %v", err)
-		mlog.Info("worktree apply conflict", slog.String("task", taskID), slog.String("err", err.Error()))
-		return execStalled
-	}
-	if err := GitApplyPatch(o.cwd, diff); err != nil {
-		o.taskLog(taskID, "Failed to apply changes to main tree: %v", err)
-		mlog.Error("worktree apply patch", slog.String("task", taskID), slog.String("err", err.Error()))
+// commitAndMerge commits all staged worktree changes and cherry-picks the commit into the main tree.
+func (o *Orchestrator) commitAndMerge(t store.TaskData, wtPath string) execResult {
+	// Stage everything in the worktree.
+	if err := GitStageAll(wtPath); err != nil {
+		o.taskLog(t.ID, "Failed to stage worktree changes: %v", err)
 		return execFailed
 	}
-	o.taskLog(taskID, "Applied changes to main tree.")
+
+	// Check if there's actually anything to commit.
+	if GitDiffHead(wtPath) == "" {
+		o.taskLog(t.ID, "No changes to commit.")
+		return execSuccess
+	}
+
+	// Commit in the worktree.
+	commitMsg := fmt.Sprintf("menace: %s", t.Description)
+	sha, err := GitCommitWorktree(wtPath, commitMsg)
+	if err != nil {
+		o.taskLog(t.ID, "Failed to commit in worktree: %v", err)
+		mlog.Error("commitAndMerge commit", slog.String("task", t.ID), slog.String("err", err.Error()))
+		return execFailed
+	}
+	o.taskLog(t.ID, "Committed in worktree: %s", sha)
+
+	// Cherry-pick into the main tree.
+	if err := GitCherryPick(o.cwd, sha); err != nil {
+		o.taskLog(t.ID, "Conflict cherry-picking into main tree: %v", err)
+		mlog.Info("commitAndMerge cherry-pick conflict", slog.String("task", t.ID), slog.String("sha", sha), slog.String("err", err.Error()))
+		// Abort the cherry-pick so main tree is left clean.
+		_ = GitCherryPickAbort(o.cwd)
+		return execStalled
+	}
+
+	o.taskLog(t.ID, "Cherry-picked %s into main tree.", sha)
 	return execSuccess
 }
 
@@ -719,6 +743,29 @@ func GitStagedFiles(cwd string) map[string]bool {
 	return result
 }
 
+// GitWorktreeReset resets a worktree to HEAD, discarding all staged and unstaged changes.
+func GitWorktreeReset(wtPath string) error {
+	cmd := exec.Command("git", "reset", "--hard", "HEAD")
+	cmd.Dir = wtPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git reset --hard: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	cmd2 := exec.Command("git", "clean", "-fd")
+	cmd2.Dir = wtPath
+	if out, err := cmd2.CombinedOutput(); err != nil {
+		return fmt.Errorf("git clean -fd: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// GitStageAll stages all changes including untracked files in cwd.
+func GitStageAll(cwd string) error {
+	cmd := exec.Command("git", "add", "-A")
+	cmd.Dir = cwd
+	return cmd.Run()
+}
+
+
 // GitWorktreeAdd creates a detached worktree at path based on HEAD.
 func GitWorktreeAdd(cwd, path string) error {
 	cmd := exec.Command("git", "worktree", "add", "--detach", path, "HEAD")
@@ -737,28 +784,40 @@ func GitWorktreeRemove(cwd, path string) error {
 	return cmd.Run()
 }
 
-// GitApplyCheck dry-runs a patch against cwd. Returns error if it would conflict.
-func GitApplyCheck(cwd, patch string) error {
-	cmd := exec.Command("git", "apply", "--check", "-")
-	cmd.Dir = cwd
-	cmd.Stdin = strings.NewReader(patch)
+// GitCommitWorktree stages all changes and commits in the worktree, returning the commit SHA.
+func GitCommitWorktree(wtPath, message string) (string, error) {
+	cmd := exec.Command("git", "commit", "-m", message)
+	cmd.Dir = wtPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("git commit: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	// Get the SHA of the commit we just made.
+	cmd2 := exec.Command("git", "rev-parse", "HEAD")
+	cmd2.Dir = wtPath
+	sha, err := cmd2.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(sha)), nil
+}
+
+// GitCherryPick cherry-picks a commit SHA into cwd.
+func GitCherryPick(cwd, sha string) error {
+	cmd := exec.Command("git", "cherry-pick", "--no-commit", sha)
+	cmd.Dir = cwd
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git cherry-pick: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// GitApplyPatch applies a patch to cwd.
-func GitApplyPatch(cwd, patch string) error {
-	cmd := exec.Command("git", "apply", "-")
+// GitCherryPickAbort aborts an in-progress cherry-pick.
+func GitCherryPickAbort(cwd string) error {
+	cmd := exec.Command("git", "cherry-pick", "--abort")
 	cmd.Dir = cwd
-	cmd.Stdin = strings.NewReader(patch)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return cmd.Run()
 }
 
 // cleanupOrphanWorktrees removes any leftover worktrees from a previous crash.
@@ -776,6 +835,8 @@ func (o *Orchestrator) cleanupOrphanWorktrees() {
 		if err := GitWorktreeRemove(o.cwd, path); err != nil {
 			// Worktree may already be gone from git's perspective; remove the dir directly.
 			_ = os.RemoveAll(path)
+			mlog.Info("cleaned up orphan worktree (dir removed)", slog.String("path", path))
+		} else {
 			mlog.Info("cleaned up orphan worktree", slog.String("path", path))
 		}
 	}
